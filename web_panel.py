@@ -5,7 +5,9 @@ bilibili_learning_bot · Web 管理面板
 功能：仪表盘 | 机器人启停 | B站扫码登录 | 配置编辑 | 实时日志
      人格管理 | 评论日志 | 用户画像 | 记忆知识库 | 日记进化 | 操作日志
 """
-import os, sys, json, time, io, base64, threading, asyncio, subprocess, signal, queue, hashlib, uuid as _uuid_module
+import os, sys, json, time, io, base64, threading, asyncio, subprocess, signal, queue, hashlib, re, uuid as _uuid_module
+from html import escape as _html_escape
+from urllib.parse import quote
 from datetime import datetime
 from pathlib import Path
 
@@ -106,6 +108,43 @@ def panel_credentials(config=None):
     username = (web_cfg.get('username') or '').strip()
     password = os.getenv('BILI_LEARNING_PANEL_PASSWORD') or web_cfg.get('password', '')
     return username, password
+
+def _sanitize_logo_svg(svg: str) -> str:
+    """Keep admin-provided SVG logos inert enough for inline preview and favicons."""
+    svg = (svg or '').strip()
+    if not svg or len(svg) > 20000:
+        return ''
+    if not re.match(r'(?is)^<svg[\s>]', svg):
+        return ''
+    unsafe = (
+        r'<\s*script\b',
+        r'<\s*foreignObject\b',
+        r'\son[a-z]+\s*=',
+        r'javascript\s*:',
+        r'data\s*:\s*text/html',
+    )
+    if any(re.search(pattern, svg, re.IGNORECASE) for pattern in unsafe):
+        return ''
+    return svg
+
+def _site_branding(config=None):
+    """Return site logo/title values used by the main panel and web app icons."""
+    config = config if config is not None else read_json(CONFIG_FILE, {})
+    site = config.get('site', {}) if isinstance(config, dict) else {}
+    logo_text = (site.get('logo_text') or 'BL').strip()[:8] or 'BL'
+    brand_name = (site.get('brand_name') or 'B站 AI 管理系统').strip() or 'B站 AI 管理系统'
+    logo_svg = _sanitize_logo_svg(site.get('logo_svg') or '')
+    if logo_svg:
+        icon_svg = logo_svg
+    else:
+        icon_svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180">'
+            '<rect width="180" height="180" rx="40" fill="#141413"/>'
+            f'<text x="90" y="108" text-anchor="middle" font-size="72" font-family="Arial, sans-serif" font-weight="700" fill="#faf9f5">{_html_escape(logo_text)}</text>'
+            '</svg>'
+        )
+    icon_data = 'data:image/svg+xml;charset=utf-8,' + quote(icon_svg)
+    return dict(logo_text=logo_text, brand_name=brand_name, logo_svg=logo_svg, icon_data=icon_data)
 
 def file_stat(path: Path):
     if not path.exists(): return {"exists": False, "size": 0, "mtime": None, "size_fmt": "0 B"}
@@ -328,9 +367,16 @@ def _load_html() -> str:
     else:
         html = _DEFAULT_HTML
     # 替换账号相关的占位符
+    config = read_json(CONFIG_FILE, {})
+    site = _site_branding(config)
     account_label = f" - {ACCOUNT_NAME}" if ACCOUNT_NAME != '默认' else ""
     html = html.replace('{{ACCOUNT_TITLE}}', f'控制面板{account_label}')
     html = html.replace('{{ACCOUNT_HEADER}}', f'控制面板{account_label}')
+    html = html.replace('{{SITE_LOGO_TEXT}}', _html_escape(site['logo_text']))
+    html = html.replace('{{SITE_BRAND_NAME}}', _html_escape(site['brand_name']))
+    html = html.replace('{{SITE_ICON_DATA}}', site['icon_data'])
+    html = html.replace('{{SITE_LOGO_SVG}}', site['logo_svg'])
+    html = html.replace('{{SITE_LOGO_MARK}}', site['logo_svg'] or _html_escape(site['logo_text']))
     return html
 
 _DEFAULT_HTML = r'''<!DOCTYPE html>
@@ -338,7 +384,13 @@ _DEFAULT_HTML = r'''<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<meta name="theme-color" content="#f5f4ed">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="{{ACCOUNT_TITLE}}">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <title>{{ACCOUNT_TITLE}}</title>
+<link rel="icon" href="{{SITE_ICON_DATA}}">
+<link rel="apple-touch-icon" href="{{SITE_ICON_DATA}}">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
 :root{
@@ -364,35 +416,20 @@ a{color:var(--accent)}
 .sidebar{width:var(--sidebar-w);min-width:var(--sidebar-w);background:rgba(250,249,245,.9);border-right:1px solid var(--sand);display:flex;flex-direction:column;position:fixed;top:0;left:0;bottom:0;z-index:110;transition:transform .22s ease;backdrop-filter:blur(18px);box-shadow:rgba(20,20,19,.03) 10px 0 34px}
 .sidebar.hide{transform:translateX(-100%)}
 .sb-hd{padding:18px 16px;border-bottom:1px solid rgba(232,230,220,.86);display:flex;align-items:center;gap:12px;min-height:66px}
-.sb-av{width:40px;height:40px;border-radius:12px;background:var(--fg);display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:650;color:var(--surface);flex-shrink:0;box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
+.sb-av{width:40px;height:40px;border-radius:12px;background:var(--fg);display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:650;color:var(--surface);flex-shrink:0;box-shadow:inset 0 0 0 1px rgba(255,255,255,.14);overflow:hidden}
+.sb-av svg{width:100%;height:100%;display:block}
 .sb-tt{font-size:15px;font-weight:650;line-height:1.2;color:var(--fg);letter-spacing:0}
 .sb-sub{font-size:11px;color:var(--faint);margin-top:2px}
-.sb-nav{flex:1;overflow-y:auto;padding:10px 10px 12px}
+.sb-nav{flex:1;overflow-y:auto;padding:10px 10px 12px;scrollbar-width:none;-ms-overflow-style:none}
+.sb-nav::-webkit-scrollbar{display:none}
 .ns{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.08em;padding:16px 12px 6px;font-weight:650}
 .ni{appearance:none;-webkit-appearance:none;display:flex;align-items:center;gap:10px;min-height:38px;padding:8px 10px;border-radius:12px;cursor:pointer;color:var(--muted);font-size:13px;border:1px solid transparent;background-color:transparent;width:100%;transition:background-color .16s ease,color .16s ease,box-shadow .16s ease,transform .16s ease;text-align:left}
-.ni:hover{background-color:rgba(232,230,220,.62);color:var(--fg);box-shadow:0 0 0 1px rgba(209,207,197,.44)}
+.ni:hover{background-color:var(--fg);color:var(--surface);box-shadow:0 10px 24px rgba(20,20,19,.12)}
 .ni:active{transform:translateY(1px)}
-.ni.ac{background-color:rgba(240,238,230,.92);color:var(--fg);font-weight:650;border-color:var(--sand);box-shadow:inset 3px 0 0 var(--accent)}
-.ni .ic{width:25px;height:24px;border-radius:8px;background:rgba(232,230,220,.62);display:flex;align-items:center;justify-content:center;font-size:0;font-weight:700;color:var(--muted);letter-spacing:0;flex-shrink:0}
-.ni.ac .ic{background:var(--fg);color:var(--surface)}
-.ni[data-pg="dash"] .ic::before{content:"览"}
-.ni[data-pg="ctrl"] .ic::before{content:"控"}
-.ni[data-pg="login"] .ic::before{content:"登"}
-.ni[data-pg="conf"] .ic::before{content:"配"}
-.ni[data-pg="psna"] .ic::before{content:"人"}
-.ni[data-pg="mood"] .ic::before{content:"心"}
-.ni[data-pg="behavior"] .ic::before{content:"行"}
-.ni[data-pg="upfu"] .ic::before{content:"UP";font-size:9px}
-.ni[data-pg="cmts"] .ic::before{content:"评"}
-.ni[data-pg="usrs"] .ic::before{content:"像"}
-.ni[data-pg="mem"] .ic::before{content:"库"}
-.ni[data-pg="diary"] .ic::before{content:"记"}
-.ni[data-pg="acts"] .ic::before{content:"志"}
-.ni[data-pg="tutor"] .ic::before{content:"学"}
-.ni[data-pg="tools"] .ic::before{content:"工"}
-.ni[data-pg="sys"] .ic::before{content:"系"}
-.ni[data-pg="about"] .ic::before{content:"i";font-family:var(--font-serif);font-size:15px}
-.ni .ic::before{font-size:11px}
+.ni.ac{background-color:var(--fg);color:var(--surface);font-weight:650;border-color:var(--fg);box-shadow:0 10px 24px rgba(20,20,19,.14)}
+.nav-ico{width:26px;height:26px;border-radius:8px;background:rgba(232,230,220,.62);display:flex;align-items:center;justify-content:center;color:var(--fg);flex-shrink:0;border:1px solid rgba(209,207,197,.42)}
+.nav-ico svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.ni:hover .nav-ico,.ni.ac .nav-ico{background:rgba(255,255,255,.12);color:var(--surface);border-color:rgba(255,255,255,.18)}
 .ni .bd{margin-left:auto;background:var(--red);color:#fff;font-size:10px;padding:1px 6px;border-radius:10px;font-weight:600;display:none}
 .sb-ft{padding:12px 14px;border-top:1px solid rgba(232,230,220,.86);font-size:11px;color:var(--faint);text-align:center}
 
@@ -408,6 +445,7 @@ a{color:var(--accent)}
 .sr{display:grid;grid-template-columns:repeat(auto-fill,minmax(184px,1fr));gap:14px;margin-bottom:22px}
 .sc{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:17px;display:flex;align-items:center;gap:13px;box-shadow:var(--shadow-card)}
 .si{width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;border:1px solid rgba(209,207,197,.48)}
+.si svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .si.bl{background:rgba(82,112,143,.13);color:var(--blue)}
 .si.gn{background:rgba(100,115,91,.13);color:var(--green)}
 .si.or{background:rgba(185,130,47,.13);color:var(--orange)}
@@ -459,6 +497,26 @@ a{color:var(--accent)}
 .fg textarea{resize:vertical;min-height:70px;font-family:var(--font-mono);font-size:11px}
 .fr{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 @media(max-width:600px){.fr{grid-template-columns:1fr}}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}
+.tab-btn{appearance:none;-webkit-appearance:none;border:1px solid var(--sand);background:var(--surface);color:var(--muted);border-radius:10px;padding:7px 11px;font-size:12px;font-weight:650;cursor:pointer;transition:background-color .16s ease,color .16s ease,border-color .16s ease}
+.tab-btn:hover,.tab-btn.on{background:var(--fg);color:var(--surface);border-color:var(--fg)}
+.config-panel{display:none}
+.config-panel.on{display:block}
+.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.form-grid.tight{grid-template-columns:repeat(auto-fit,minmax(160px,1fr))}
+.field-note{font-size:11px;color:var(--faint);margin-top:4px;line-height:1.45}
+.logo-row{display:grid;grid-template-columns:minmax(160px,220px) 1fr;gap:16px;align-items:start}
+.logo-preview{width:120px;height:120px;border-radius:26px;background:var(--fg);color:var(--surface);display:flex;align-items:center;justify-content:center;font-size:36px;font-weight:750;overflow:hidden;box-shadow:var(--shadow-card);border:1px solid rgba(20,20,19,.08)}
+.logo-preview svg{width:100%;height:100%;display:block}
+.settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
+.setting-card{background:var(--white);border:1px solid var(--sand);border-radius:14px;padding:13px 14px}
+.setting-card strong{display:block;color:var(--fg);font-size:13px;margin-bottom:4px}
+.setting-card span{font-size:11px;color:var(--muted);line-height:1.45}
+.agent-shell{display:grid;grid-template-columns:minmax(260px,360px) 1fr;gap:16px;align-items:start}
+.persona-item{background:var(--white);border:1px solid var(--sand);border-radius:14px;padding:14px;margin-bottom:10px}
+.persona-item.active{border-color:var(--fg);box-shadow:0 0 0 1px var(--fg)}
+.persona-item h3{font-family:var(--font-sans);font-size:14px;font-weight:700;margin-bottom:6px}
+@media(max-width:900px){.agent-shell,.logo-row{grid-template-columns:1fr}}
 
 .toggle-sw{position:relative;display:inline-flex;align-items:center;cursor:pointer;color:var(--text)}
 .toggle-sw input{position:absolute;opacity:0;pointer-events:none}
@@ -495,7 +553,8 @@ a{color:var(--accent)}
 
 /* EMPTY */
 .emp{text-align:center;padding:34px;color:var(--muted)}
-.emp .ic{font-size:28px;margin-bottom:8px;opacity:.72}
+.emp .ic{width:32px;height:32px;margin:0 auto 8px;opacity:.72;color:var(--fg)}
+.emp .ic svg{width:100%;height:100%;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 
 /* MOBILE */
 .mob-toggle{display:none;position:fixed;top:12px;left:12px;z-index:220;background:rgba(250,249,245,.94);border:1px solid var(--sand);color:var(--fg);width:40px;height:40px;border-radius:12px;align-items:center;justify-content:center;cursor:pointer;font-size:18px;box-shadow:var(--shadow-card);backdrop-filter:blur(12px)}
@@ -529,33 +588,33 @@ a{color:var(--accent)}
 <!-- SIDEBAR -->
 <aside class="sidebar" id="sidebar">
 <div class="sb-hd">
-<div class="sb-av">⚡</div><div><div class="sb-tt">{{ACCOUNT_HEADER}}</div><div class="sb-sub">B站 AI 管理系统</div></div>
+<div class="sb-av" id="siteLogoMark">{{SITE_LOGO_MARK}}</div><div><div class="sb-tt">{{ACCOUNT_HEADER}}</div><div class="sb-sub" id="siteBrandName">{{SITE_BRAND_NAME}}</div></div>
 </div>
 <nav class="sb-nav">
 <div class="ns">总览</div>
-<button class="ni ac" data-pg="dash" onclick="nav('dash',this)"><span class="ic">📊</span>仪表盘</button>
-<button class="ni" data-pg="ctrl" onclick="nav('ctrl',this)"><span class="ic">🎮</span>机器人控制<span class="bd" id="botBadge">●</span></button>
-<button class="ni" data-pg="login" onclick="nav('login',this)"><span class="ic">🔑</span>B站登录<span class="bd" id="loginBadge">●</span></button>
+<button class="ni ac" data-pg="dash" onclick="nav('dash',this)"><span class="nav-ico" data-icon="dash"></span>仪表盘</button>
+<button class="ni" data-pg="ctrl" onclick="nav('ctrl',this)"><span class="nav-ico" data-icon="ctrl"></span>机器人控制<span class="bd" id="botBadge">●</span></button>
+<button class="ni" data-pg="login" onclick="nav('login',this)"><span class="nav-ico" data-icon="login"></span>B站登录<span class="bd" id="loginBadge">●</span></button>
 <div class="ns">系统配置</div>
-<button class="ni" data-pg="conf" onclick="nav('conf',this)"><span class="ic">⚙️</span>配置编辑</button>
-<button class="ni" data-pg="psna" onclick="nav('psna',this)"><span class="ic">🎭</span>人格管理</button>
-<button class="ni" data-pg="mood" onclick="nav('mood',this)"><span class="ic">💡</span>心情管理</button>
-<button class="ni" data-pg="behavior" onclick="nav('behavior',this)"><span class="ic">⚡</span>行为设置</button>
-<button class="ni" data-pg="upfu" onclick="nav('upfu',this)"><span class="ic">👥</span>UP主关注</button>
+<button class="ni" data-pg="conf" onclick="nav('conf',this)"><span class="nav-ico" data-icon="conf"></span>配置编辑</button>
+<button class="ni" data-pg="psna" onclick="nav('psna',this)"><span class="nav-ico" data-icon="agent"></span>Agent 管理</button>
+<button class="ni" data-pg="mood" onclick="nav('mood',this)"><span class="nav-ico" data-icon="mood"></span>心情管理</button>
+<button class="ni" data-pg="behavior" onclick="nav('behavior',this)"><span class="nav-ico" data-icon="behavior"></span>行为设置</button>
+<button class="ni" data-pg="upfu" onclick="nav('upfu',this)"><span class="nav-ico" data-icon="upfu"></span>UP主关注</button>
 <div class="ns">数据监控</div>
-<button class="ni" data-pg="cmts" onclick="nav('cmts',this)"><span class="ic">💬</span>评论日志</button>
-<button class="ni" data-pg="usrs" onclick="nav('usrs',this)"><span class="ic">👤</span>用户画像</button>
-<button class="ni" data-pg="mem" onclick="nav('mem',this)"><span class="ic">🧠</span>记忆知识库</button>
-<button class="ni" data-pg="diary" onclick="nav('diary',this)"><span class="ic">📖</span>日记进化</button>
-<button class="ni" data-pg="acts" onclick="nav('acts',this)"><span class="ic">📋</span>操作日志</button>
+<button class="ni" data-pg="cmts" onclick="nav('cmts',this)"><span class="nav-ico" data-icon="cmts"></span>评论日志</button>
+<button class="ni" data-pg="usrs" onclick="nav('usrs',this)"><span class="nav-ico" data-icon="usrs"></span>用户画像</button>
+<button class="ni" data-pg="mem" onclick="nav('mem',this)"><span class="nav-ico" data-icon="mem"></span>记忆知识库</button>
+<button class="ni" data-pg="diary" onclick="nav('diary',this)"><span class="nav-ico" data-icon="diary"></span>日记进化</button>
+<button class="ni" data-pg="acts" onclick="nav('acts',this)"><span class="nav-ico" data-icon="acts"></span>操作日志</button>
 <div class="ns">工具</div>
-<button class="ni" data-pg="tutor" onclick="nav('tutor',this)"><span class="ic">🎓</span>知识辅导</button>
-<button class="ni" data-pg="tools" onclick="nav('tools',this)"><span class="ic">🔧</span>功能中心</button>
-<button class="ni" data-pg="sys" onclick="nav('sys',this)"><span class="ic">💾</span>系统管理</button>
+<button class="ni" data-pg="tutor" onclick="nav('tutor',this)"><span class="nav-ico" data-icon="tutor"></span>知识辅导</button>
+<button class="ni" data-pg="tools" onclick="nav('tools',this)"><span class="nav-ico" data-icon="tools"></span>功能中心</button>
+<button class="ni" data-pg="sys" onclick="nav('sys',this)"><span class="nav-ico" data-icon="sys"></span>系统管理</button>
 <div class="ns">帮助</div>
-<button class="ni" data-pg="about" onclick="nav('about',this)"><span class="ic">ℹ️</span>关于</button>
+<button class="ni" data-pg="about" onclick="nav('about',this)"><span class="nav-ico" data-icon="about"></span>关于</button>
 </nav>
-<div class="sb-ft">已运行 <span id="uptime">--</span><div style="color:var(--red);font-size:9px;margin-top:4px">⚡ 仅供学习参考</div></div>
+<div class="sb-ft">已运行 <span id="uptime">--</span><div style="color:var(--red);font-size:9px;margin-top:4px">仅供学习参考</div></div>
 </aside>
 
 <!-- MAIN -->
@@ -563,7 +622,7 @@ a{color:var(--accent)}
 
 <!-- DASHBOARD -->
 <div class="page on" id="pg-dash">
-<div class="ph"><h1>📊 系统仪表盘</h1><p>实时监控 · 数据可视化 · 运行状态</p></div>
+<div class="ph"><h1>系统仪表盘</h1><p>实时监控 · 数据可视化 · 运行状态</p></div>
 <div class="sr" id="dashStats"></div>
 <div class="chart-grid">
 <div class="chart-card"><h4>评论活跃度趋势</h4><canvas id="chartComments"></canvas></div>
@@ -572,39 +631,39 @@ a{color:var(--accent)}
 <div class="chart-card"><h4>视频处理速率</h4><canvas id="chartVideos"></canvas></div>
 </div>
 <div class="pc"><h3><span class="dot" id="botDot"></span>系统详情</h3><div id="botDetail"></div></div>
-<div class="pc"><h3>📁 数据文件状态</h3><div id="fileGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;font-size:12px"></div></div>
-<div class="notice">⚠ 免责声明：本项目仅供学习参考，若因使用本项目产生的任何后果，本人一律概不负责。</div>
+<div class="pc"><h3>数据文件状态</h3><div id="fileGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;font-size:12px"></div></div>
+<div class="notice">免责声明：本项目仅供学习参考，若因使用本项目产生的任何后果，本人一律概不负责。</div>
 </div>
 
 <!-- CONTROL -->
 <div class="page" id="pg-ctrl">
-<div class="ph"><h1>🎮 机器人控制</h1><p>启动/停止/重启</p></div>
+<div class="ph"><h1>机器人控制</h1><p>启动/停止/重启</p></div>
 <div class="pc">
-<h3>🤖 运行状态</h3><div id="ctrlStatus" style="margin-bottom:12px"></div>
+<h3>运行状态</h3><div id="ctrlStatus" style="margin-bottom:12px"></div>
 <div class="btn-grp">
-<button class="btn btn-suc btn-lg" id="btnStart" onclick="startBot()">▶ 启动机器人</button>
-<button class="btn btn-dan btn-lg" id="btnStop" style="display:none" onclick="stopBot()">⏹ 停止</button>
-<button class="btn btn-out" onclick="restartBot()">🔄 重启</button>
-<button class="btn btn-out" onclick="clearLog()">🗑 清空日志</button>
+<button class="btn btn-suc btn-lg" id="btnStart" onclick="startBot()"><span class="nav-ico" data-icon="ctrl"></span>启动机器人</button>
+<button class="btn btn-dan btn-lg" id="btnStop" style="display:none" onclick="stopBot()"><span class="nav-ico" data-icon="sys"></span>停止</button>
+<button class="btn btn-out" onclick="restartBot()"><span class="nav-ico" data-icon="acts"></span>重启</button>
+<button class="btn btn-out" onclick="clearLog()"><span class="nav-ico" data-icon="tools"></span>清空日志</button>
 </div>
 </div>
-<div class="pc"><h3>📡 实时输出</h3><div class="log-box" id="botLog">等待输出...</div></div>
-<div class="notice">⚠ 免责声明：本项目仅供学习参考，若因使用本项目产生的任何后果，本人一律概不负责。</div>
+<div class="pc"><h3>实时输出</h3><div class="log-box" id="botLog">等待输出...</div></div>
+<div class="notice">免责声明：本项目仅供学习参考，若因使用本项目产生的任何后果，本人一律概不负责。</div>
 </div>
 
 <!-- LOGIN -->
 <div class="page" id="pg-login">
-<div class="ph"><h1>🔑 B站登录</h1><p>扫码登录 / 登出 / 状态</p></div>
+<div class="ph"><h1>B站登录</h1><p>扫码登录 / 登出 / 状态</p></div>
 <div class="pc" id="loginPanel">
-<h3>📱 扫码登录</h3>
+<h3>扫码登录</h3>
 <div id="loginStatus"></div>
 <div id="qrArea" style="display:none">
 <div class="qr-wrap"><img id="qrImg" src="" alt="QR码"><div class="qr-status" id="qrStatusText"></div></div>
 </div>
 <div class="btn-grp">
-<button class="btn btn-suc btn-lg" id="btnQR" onclick="startQRLogin()">📷 生成登录二维码</button>
-<button class="btn btn-dan" id="btnLogout" onclick="logoutBili()">🚪 退出登录</button>
-<button class="btn btn-out" onclick="checkLogin()">🔍 检查状态</button>
+<button class="btn btn-suc btn-lg" id="btnQR" onclick="startQRLogin()"><span class="nav-ico" data-icon="login"></span>生成登录二维码</button>
+<button class="btn btn-dan" id="btnLogout" onclick="logoutBili()"><span class="nav-ico" data-icon="sys"></span>退出登录</button>
+<button class="btn btn-out" onclick="checkLogin()"><span class="nav-ico" data-icon="dash"></span>检查状态</button>
 </div>
 <div id="cookieInfo" style="margin-top:12px;font-size:11px;color:var(--text2)"></div>
 </div>
@@ -612,57 +671,198 @@ a{color:var(--accent)}
 
 <!-- CONFIG -->
 <div class="page" id="pg-conf">
-<div class="ph"><h1>⚙️ 配置编辑</h1><p>Data/config.json</p></div>
-<div class="pc">
+<div class="ph"><h1>配置编辑</h1><p>可视化编辑常用设置，JSON 高级模式保留完整配置</p></div>
+<div class="pc" id="confVisual">
+<div class="tabs" id="confTabs">
+<button class="tab-btn on" data-cfg-tab="site" onclick="switchConfTab('site',this)">站点 Logo</button>
+<button class="tab-btn" data-cfg-tab="api" onclick="switchConfTab('api',this)">大模型 API</button>
+<button class="tab-btn" data-cfg-tab="models" onclick="switchConfTab('models',this)">模型</button>
+<button class="tab-btn" data-cfg-tab="bili" onclick="switchConfTab('bili',this)">B站</button>
+<button class="tab-btn" data-cfg-tab="automation" onclick="switchConfTab('automation',this)">自动化</button>
+<button class="tab-btn" data-cfg-tab="video" onclick="switchConfTab('video',this)">视频理解</button>
+<button class="tab-btn" data-cfg-tab="agent" onclick="switchConfTab('agent',this)">Agent</button>
+<button class="tab-btn" data-cfg-tab="json" onclick="switchConfTab('json',this)">JSON 高级</button>
+</div>
+
+<div class="config-panel on" id="cfg-site">
+<div class="logo-row">
+<div>
+<div class="logo-preview" id="siteLogoPreview">{{SITE_LOGO_TEXT}}</div>
+<div class="field-note">保存后会同步侧栏品牌、favicon、Apple/iOS Web App 图标。</div>
+</div>
+<div>
+<div class="form-grid">
+<div class="fg"><label>品牌名称</label><input id="siteBrandInput" data-cfg-path="site.brand_name" placeholder="B站 AI 管理系统"></div>
+<div class="fg"><label>文字 Logo</label><input id="siteLogoText" data-cfg-path="site.logo_text" maxlength="8" placeholder="BL" oninput="previewSiteLogo()"></div>
+</div>
+<div class="fg"><label>自定义 SVG Logo</label><textarea id="siteLogoSvg" data-cfg-path="site.logo_svg" placeholder="<svg ...>...</svg>" oninput="previewSiteLogo()"></textarea><div class="field-note">留空时使用黑底白字自动生成图标；填写 SVG 时会作为全站图标源。</div></div>
+</div>
+</div>
+</div>
+
+<div class="config-panel" id="cfg-api">
+<div class="form-grid">
+<div class="fg"><label>API Key</label><input id="apiKeyInput" data-cfg-path="api.unified_api_key" type="password" autocomplete="off" placeholder="sk-..."></div>
+<div class="fg"><label>Base URL</label><input data-cfg-path="api.unified_base_url" placeholder="https://api.openai.com/v1"></div>
+<div class="fg"><label>主脑模型</label><input data-cfg-path="api.model_brain" placeholder="gpt-4.1-mini"></div>
+<div class="fg"><label>视觉模型</label><input data-cfg-path="api.model_vision" placeholder="gpt-4.1-mini"></div>
+</div>
+<div class="fr">
+<label class="toggle-sw"><input type="checkbox" data-cfg-path="fallback_provider.enabled"><span class="toggle-track"></span><span style="margin-left:10px;font-size:13px">启用备用 Provider</span></label>
+<div class="fg"><label>备用 Provider 名称</label><input data-cfg-path="fallback_provider.name" placeholder="chatanywhere"></div>
+</div>
+<div class="form-grid">
+<div class="fg"><label>备用 API Key</label><input data-cfg-path="fallback_provider.api_key" type="password" autocomplete="off"></div>
+<div class="fg"><label>备用 Base URL</label><input data-cfg-path="fallback_provider.base_url"></div>
+</div>
+</div>
+
+<div class="config-panel" id="cfg-models">
+<div class="form-grid">
+<div class="fg"><label>Chat</label><input data-cfg-path="models.chat"></div>
+<div class="fg"><label>Vision</label><input data-cfg-path="models.vision"></div>
+<div class="fg"><label>Image</label><input data-cfg-path="models.image"></div>
+<div class="fg"><label>Fast</label><input data-cfg-path="models.fast"></div>
+<div class="fg"><label>Embedding</label><input data-cfg-path="models.embedding"></div>
+</div>
+</div>
+
+<div class="config-panel" id="cfg-bili">
+<div class="form-grid">
+<div class="fg"><label>Owner MID</label><input data-cfg-path="bilibili.owner_mid"></div>
+<div class="fg"><label>Refresh Token</label><input data-cfg-path="bilibili.refresh_token" type="password" autocomplete="off"></div>
+</div>
+<div class="field-note">也可以在“B站登录”页面扫码生成登录状态。</div>
+</div>
+
+<div class="config-panel" id="cfg-automation">
+<div class="form-grid tight">
+<label class="toggle-sw"><input type="checkbox" data-cfg-path="automation.dry_run"><span class="toggle-track"></span><span style="margin-left:10px;font-size:13px">Dry Run</span></label>
+<label class="toggle-sw"><input type="checkbox" data-cfg-path="automation.enable_proactive"><span class="toggle-track"></span><span style="margin-left:10px;font-size:13px">主动学习</span></label>
+<label class="toggle-sw"><input type="checkbox" data-cfg-path="automation.enable_web_search"><span class="toggle-track"></span><span style="margin-left:10px;font-size:13px">Web Search</span></label>
+<label class="toggle-sw"><input type="checkbox" data-cfg-path="automation.enable_mood"><span class="toggle-track"></span><span style="margin-left:10px;font-size:13px">心情系统</span></label>
+<label class="toggle-sw"><input type="checkbox" data-cfg-path="automation.enable_affection"><span class="toggle-track"></span><span style="margin-left:10px;font-size:13px">用户好感</span></label>
+<label class="toggle-sw"><input type="checkbox" data-cfg-path="automation.allow_comment"><span class="toggle-track"></span><span style="margin-left:10px;font-size:13px">允许评论</span></label>
+</div>
+<div class="form-grid">
+<div class="fg"><label>每日动作上限</label><input type="number" data-cfg-path="automation.max_daily_actions"></div>
+<div class="fg"><label>主动视频数</label><input type="number" data-cfg-path="automation.proactive_video_count"></div>
+<div class="fg"><label>评论轮询间隔(秒)</label><input type="number" data-cfg-path="automation.comment_poll_interval"></div>
+<div class="fg"><label>睡眠开始</label><input data-cfg-path="automation.sleep_start" placeholder="02:00"></div>
+<div class="fg"><label>睡眠结束</label><input data-cfg-path="automation.sleep_end" placeholder="08:00"></div>
+</div>
+</div>
+
+<div class="config-panel" id="cfg-video">
+<div class="form-grid">
+<div class="fg"><label>理解模式</label><select data-cfg-path="video.mode"><option value="smart">smart</option><option value="subtitle">subtitle</option><option value="frames">frames</option><option value="hybrid">hybrid</option></select></div>
+<div class="fg"><label>最长视频(秒)</label><input type="number" data-cfg-path="video.max_duration_seconds"></div>
+<div class="fg"><label>抽帧数量</label><input type="number" data-cfg-path="video.frame_count"></div>
+<div class="fg"><label>下载兴趣阈值</label><input type="number" step="0.1" data-cfg-path="video.download_interest_threshold"></div>
+<div class="fg"><label>下载目录</label><input data-cfg-path="video.download_dir"></div>
+<label class="toggle-sw"><input type="checkbox" data-cfg-path="video.delete_video_after_understand"><span class="toggle-track"></span><span style="margin-left:10px;font-size:13px">理解后删除视频</span></label>
+</div>
+<div class="form-grid">
+<div class="fg"><label>ASR 启用</label><select data-cfg-path="asr.enabled" data-cfg-type="bool"><option value="true">开启</option><option value="false">关闭</option></select></div>
+<div class="fg"><label>ASR 引擎</label><select data-cfg-path="asr.backend"><option value="funasr">FunASR</option><option value="whisper">Whisper</option></select></div>
+<div class="fg"><label>ASR 语言</label><input data-cfg-path="asr.language" placeholder="zh"></div>
+<label class="toggle-sw"><input type="checkbox" data-cfg-path="dry_goods.enabled"><span class="toggle-track"></span><span style="margin-left:10px;font-size:13px">Highlights 归档</span></label>
+<div class="fg"><label>归档分数门槛</label><input type="number" step="0.1" data-cfg-path="dry_goods.min_score"></div>
+<div class="fg"><label>归档文件夹</label><input data-cfg-path="dry_goods.folder_name" placeholder="highlights"></div>
+</div>
+</div>
+
+<div class="config-panel" id="cfg-agent">
+<div class="form-grid tight">
+<label class="toggle-sw"><input type="checkbox" data-cfg-path="agent.enabled"><span class="toggle-track"></span><span style="margin-left:10px;font-size:13px">启用 Agent</span></label>
+<label class="toggle-sw"><input type="checkbox" data-cfg-path="agent.auto_enabled"><span class="toggle-track"></span><span style="margin-left:10px;font-size:13px">自动 Agent</span></label>
+<label class="toggle-sw"><input type="checkbox" data-cfg-path="agent.dive_enabled"><span class="toggle-track"></span><span style="margin-left:10px;font-size:13px">深度搜索</span></label>
+</div>
+<div class="form-grid">
+<div class="fg"><label>计划最大步骤</label><input type="number" data-cfg-path="agent.max_steps_per_plan"></div>
+<div class="fg"><label>搜索结果数</label><input type="number" data-cfg-path="agent.max_search_results"></div>
+<div class="fg"><label>每计划视频数</label><input type="number" data-cfg-path="agent.max_videos_per_plan"></div>
+<div class="fg"><label>自动触发最低分</label><input type="number" step="0.1" data-cfg-path="agent.auto_min_score"></div>
+<div class="fg"><label>冷却(分钟)</label><input type="number" data-cfg-path="agent.cooldown_minutes"></div>
+</div>
+</div>
+
+<div class="config-panel" id="cfg-json">
 <textarea class="je" id="confEd"></textarea>
-<div class="btn-grp"><button class="btn btn-pr" onclick="saveConf()">💾 保存</button><button class="btn btn-out" onclick="loadConf()">🔄 重新加载</button></div>
+</div>
+
+<div class="btn-grp"><button class="btn btn-pr" onclick="saveConf()">保存配置</button><button class="btn btn-out" onclick="loadConf()">重新加载</button><span id="confMsg" style="font-size:11px;color:var(--muted);align-self:center"></span></div>
 </div>
 </div>
 
 <!-- PERSONA -->
 <div class="page" id="pg-psna">
-<div class="ph"><h1>🎭 人格管理</h1><p>管理机器人对话人格</p></div>
-<div id="psnaList"></div>
+<div class="ph"><h1>Agent 管理</h1><p>人格、人设与 Agent 执行设置</p></div>
+<div class="agent-shell">
+<div>
+<div class="pc"><h3>人格列表</h3><div id="psnaList"></div></div>
+<div class="pc"><h3>新建人设</h3>
+<div class="fg"><label>名称</label><input id="npName" placeholder="如：学习搭子"></div>
+<div class="fg"><label>系统 Prompt</label><textarea id="npPrompt" placeholder="你是..."></textarea></div>
+<div class="fg"><label>表达风格</label><input id="npStyle" placeholder="温和、犀利、克制"></div>
+<div class="fg"><label>主人设定</label><input id="npOwner" placeholder="可选"></div>
+<div class="fg"><label>行为边界（一行一条）</label><textarea id="npRules" placeholder="不泄露隐私&#10;遇到不确定信息先核实"></textarea></div>
+<button class="btn btn-pr" onclick="addPsna()">创建人设</button>
+</div>
+</div>
+<div>
+<div class="pc"><h3>手动 Agent 任务</h3>
+<div class="form-grid">
+<div class="fg"><label>使用人格</label><select id="agentPersonaSelect"></select></div>
+<div class="fg"><label>执行模式</label><select id="agentMode"><option value="queue">加入任务队列</option><option value="manual">手动目标</option><option value="dive">深度搜索</option></select></div>
+</div>
+<div class="fg"><label>目标描述</label><textarea id="agentGoal" placeholder="例如：搜索深度学习入门并总结前 3 个视频"></textarea></div>
+<div class="btn-grp"><button class="btn btn-pr" onclick="runAgent()">执行 Agent</button><button class="btn btn-out" onclick="rf_psna()">刷新设置</button></div>
+</div>
+<div class="pc"><h3>Agent 可选设置</h3><div class="settings-grid" id="agentSettingsGrid"></div></div>
+<div class="pc"><h3>当前人格详情</h3><div id="activePersonaDetail"></div></div>
+</div>
+</div>
 </div>
 
 <!-- COMMENTS -->
 <div class="page" id="pg-cmts">
-<div class="ph"><h1>💬 评论日志</h1><p>最近评论互动</p></div>
+<div class="ph"><h1>评论日志</h1><p>最近评论互动</p></div>
 <div class="pc"><div id="cmtTab"></div></div>
 </div>
 
 <!-- USERS -->
 <div class="page" id="pg-usrs">
-<div class="ph"><h1>👤 用户画像</h1><p>好感度与印象</p></div>
+<div class="ph"><h1>用户画像</h1><p>好感度与印象</p></div>
 <div class="pc"><div id="usrTab"></div></div>
 </div>
 
 <!-- MEMORY -->
 <div class="page" id="pg-mem">
-<div class="ph"><h1>🧠 记忆 & 知识库</h1></div>
+<div class="ph"><h1>记忆 & 知识库</h1></div>
 <div id="memBox"></div>
 </div>
 
 <!-- DIARY -->
 <div class="page" id="pg-diary">
-<div class="ph"><h1>📖 日记 & 进化</h1></div>
+<div class="ph"><h1>日记 & 进化</h1></div>
 <div id="diaryBox"></div>
 </div>
 
 <!-- ACTIONS -->
 <div class="page" id="pg-acts">
-<div class="ph"><h1>📋 操作日志</h1></div>
+<div class="ph"><h1>操作日志</h1></div>
 <div class="pc"><div id="actTab"></div></div>
 </div>
 
 <!-- MOOD -->
 <div class="page" id="pg-mood">
-<div class="ph"><h1>💡 心情管理</h1><p>查看/切换机器人心情状态</p></div>
+<div class="ph"><h1>心情管理</h1><p>查看/切换机器人心情状态</p></div>
 <div class="pc"><h3>当前状态</h3><div id="moodStatus"></div></div>
-<div class="pc"><h3>⚡ 快速切换心情</h3>
+<div class="pc"><h3>快速切换心情</h3>
 <div class="btn-grp" id="moodQuickBtns"></div>
 </div>
-<div class="pc"><h3>⚙️ 心情设置</h3>
+<div class="pc"><h3>心情设置</h3>
 <div class="fg"><label>默认心情</label><input id="moodDefault" placeholder="平静"></div>
 <div class="fr">
 <div class="fg"><label><input type="checkbox" id="moodRandom" onchange="moodToggleRandom()"> 随机心情切换</label></div>
@@ -672,22 +872,22 @@ a{color:var(--accent)}
 <div class="fg"><label><input type="checkbox" id="moodCustom" onchange="moodToggleCustom()"> 自定义心情</label></div>
 <div class="fg"><label>自定义心情文字</label><input id="moodCustomText"></div>
 </div>
-<div class="btn-grp"><button class="btn btn-pr" onclick="saveMood()">💾 保存设置</button></div>
+<div class="btn-grp"><button class="btn btn-pr" onclick="saveMood()">保存设置</button></div>
 </div>
 </div>
 
 <!-- BEHAVIOR -->
 <div class="page" id="pg-behavior">
-<div class="ph"><h1>⚡ 行为设置</h1><p>AI免责声明 · 精力管理 · 评论模式</p></div>
-<div class="pc"><h3>🤖 AI免责声明</h3>
+<div class="ph"><h1>行为设置</h1><p>AI免责声明 · 精力管理 · 评论模式</p></div>
+<div class="pc"><h3>AI免责声明</h3>
 <p style="font-size:11px;color:var(--text2);margin-bottom:10px">所有评论/私信回复末尾会追加免责声明标签。关闭后不再添加，但建议保持开启以遵守平台规定。</p>
 <div class="fr" style="align-items:center;margin-bottom:8px">
 <label class="toggle-sw"><input type="checkbox" id="aiMarkerOn" onchange="toggleAiMarker()"><span class="toggle-track"></span><span style="margin-left:10px;font-size:13px">启用免责声明</span></label>
 </div>
 <div class="fg"><label>免责声明文字</label><input id="aiMarkerText" placeholder="（内容由AI生成并由AI回复）" maxlength="50" style="max-width:300px"></div>
-<div class="btn-grp"><button class="btn btn-pr" id="btnSaveMarker" onclick="saveAiMarker()">💾 保存</button><span id="aiMarkerMsg" style="font-size:11px;margin-left:8px"></span></div>
+<div class="btn-grp"><button class="btn btn-pr" id="btnSaveMarker" onclick="saveAiMarker()">保存</button><span id="aiMarkerMsg" style="font-size:11px;margin-left:8px"></span></div>
 </div>
-<div class="pc"><h3>⚡ 精力设置</h3>
+<div class="pc"><h3>精力设置</h3>
 <p style="font-size:11px;color:var(--text2);margin-bottom:10px">控制AI机器人精力恢复速度和行为间隔。</p>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
 <div class="fg"><label>最大精力值</label><input id="engMaxEnergy" type="number" min="50" max="500" style="max-width:100px"></div>
@@ -700,18 +900,17 @@ a{color:var(--accent)}
 <div class="fg"><label>视频间隔(秒,最小)</label><input id="engVideoIntMin" type="number" min="5" max="300" style="max-width:100px"></div>
 <div class="fg"><label>视频间隔(秒,最大)</label><input id="engVideoIntMax" type="number" min="5" max="300" style="max-width:100px"></div>
 </div>
-<div class="btn-grp"><button class="btn btn-pr" onclick="saveEnergy()">💾 保存精力设置</button><span id="engMsg" style="font-size:11px;margin-left:8px"></span></div>
+<div class="btn-grp"><button class="btn btn-pr" onclick="saveEnergy()">保存精力设置</button><span id="engMsg" style="font-size:11px;margin-left:8px"></span></div>
 </div>
-<div class="pc"><h3>💬 评论模式</h3>
+<div class="pc"><h3>评论模式</h3>
 <div class="fr" style="align-items:center;gap:12px">
 <label style="cursor:pointer"><input type="radio" name="cmtMode" value="real" onchange="saveCommentMode()"> 真实模式 (发送到B站)</label>
 <label style="cursor:pointer"><input type="radio" name="cmtMode" value="simulate" onchange="saveCommentMode()"> 模拟模式 (仅记录日志)</label>
 </div>
 <span id="cmtModeMsg" style="font-size:11px;margin-left:8px"></span>
 </div>
-</div>
 
-	<div class="pc"><h3>🛡️ 关键词安全校验</h3>
+	<div class="pc"><h3>关键词安全校验</h3>
 	<p style="font-size:11px;color:var(--text2);margin-bottom:10px">开启后AI会过滤涉及敏感关键词的评论和回复。关闭后不再进行关键词检查（风险自负）。</p>
 	<div class="fr" style="align-items:center;margin-bottom:10px">
 	<label class="toggle-sw"><input type="checkbox" id="safetyEnabled" onchange="toggleSafety()"><span class="toggle-track"></span><span style="margin-left:10px;font-size:13px">启用关键词校验</span></label>
@@ -720,7 +919,7 @@ a{color:var(--accent)}
 	<p style="font-size:11px;color:var(--text2);margin-bottom:6px">当前屏蔽关键词（一行一个）：</p>
 	<textarea id="safetyKeywords" style="width:100%;height:120px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);color:var(--text);font-size:12px;padding:8px;font-family:monospace;resize:vertical"></textarea>
 	<div class="btn-grp" style="margin-top:8px">
-	<button class="btn btn-pr" onclick="saveSafetyKeywords()">💾 保存关键词</button>
+	<button class="btn btn-pr" onclick="saveSafetyKeywords()">保存关键词</button>
 	<button class="btn btn-out btn-sm" onclick="addSafetyKeyword()">+ 添加关键词</button>
 	</div>
 	<div class="fg" style="margin-top:8px"><label>快速添加关键词</label>
@@ -733,93 +932,69 @@ a{color:var(--accent)}
 
 <!-- UPFOLLOW -->
 <div class="page" id="pg-upfu">
-<div class="ph"><h1>👥 UP主关注列表</h1><p>AI已关注的UP主</p></div>
+<div class="ph"><h1>UP主关注列表</h1><p>AI已关注的UP主</p></div>
 <div class="pc"><div id="upfuTab"></div></div>
 </div>
 
 <!-- TOOLS -->
 <div class="page" id="pg-tools">
-<div class="ph"><h1>🔧 功能中心</h1><p>手动操作 · 任务队列</p></div>
-<div class="pc"><h3>🎬 手动发送弹幕</h3>
+<div class="ph"><h1>功能中心</h1><p>手动操作 · 任务队列</p></div>
+<div class="pc"><h3>手动发送弹幕</h3>
 <div class="fr"><div class="fg"><label>BV号</label><input id="danmakuBvid" placeholder="BV1xx411c7mD"></div><div class="fg"><label>弹幕内容 (≤20字)</label><input id="danmakuText" maxlength="20" placeholder="第~"></div></div>
-<button class="btn btn-pr" onclick="sendDanmaku()">📤 发送弹幕</button>
+<button class="btn btn-pr" onclick="sendDanmaku()">发送弹幕</button>
 </div>
-<div class="pc"><h3>📹 手动视频分析</h3>
+<div class="pc"><h3>手动视频分析</h3>
 <div class="fg"><label>BV号 / 视频链接</label><input id="analyzeBvid" placeholder="BV1xx411c7mD 或 完整链接"></div>
-<button class="btn btn-pr" onclick="analyzeVideo()">🔍 开始分析</button>
+<button class="btn btn-pr" onclick="analyzeVideo()">开始分析</button>
 </div>
-<div class="pc"><h3>🤖 Agent 技能</h3>
-<div class="fg"><label>目标描述（用自然语言描述你想让AI做什么）</label><input id="agentGoal" placeholder="例如：搜索"深度学习入门"并总结前3个视频"></div>
-<button class="btn btn-pr" onclick="runAgent()">🚀 执行Agent</button>
-</div>
-<div class="pc"><h3>📚 知识库操作</h3>
+<div class="pc"><h3>知识库操作</h3>
 <div class="btn-grp">
-<button class="btn btn-pr" onclick="kbOrganize()">📂 一键整理知识库</button>
-<button class="btn btn-out" onclick="kbRevisit()">📖 复习已学内容</button>
-<button class="btn btn-out" onclick="rf_kbStats()">📊 查看统计</button>
+<button class="btn btn-pr" onclick="kbOrganize()">一键整理知识库</button>
+<button class="btn btn-out" onclick="kbRevisit()">复习已学内容</button>
+<button class="btn btn-out" onclick="rf_kbStats()">查看统计</button>
 </div>
 <div id="kbStatBox" style="margin-top:12px;font-size:12px"></div>
 </div>
 </div>
 
-<div class="pc"><h3>🎙️ ASR 语音识别设置</h3>
-<p style="font-size:11px;color:var(--text2);margin-bottom:10px">语音识别引擎配置（FunASR / Whisper）。</p>
-<div class="fr">
-<div class="fg"><label>启用ASR</label><select id="asrEnabled"><option value="1">开启</option><option value="0">关闭</option></select></div>
-<div class="fg"><label>识别引擎</label><select id="asrBackend"><option value="funasr">FunASR（推荐）</option><option value="whisper">Whisper</option></select></div>
-<div class="fg"><label>语言</label><input id="asrLang" placeholder="zh" style="max-width:80px"></div>
-<div class="fg"><label>说话人分离</label><select id="asrSep"><option value="1">开启</option><option value="0">关闭</option></select></div>
-</div>
-<div class="btn-grp"><button class="btn btn-pr" onclick="saveAsr()">💾 保存ASR设置</button><span id="asrMsg" style="font-size:11px;margin-left:8px"></span></div>
-</div>
-<div class="pc"><h3>⭐ Highlights 归档设置</h3>
-<p style="font-size:11px;color:var(--text2);margin-bottom:10px">高分视频自动备份到 highlights/ 目录。</p>
-<div class="fr">
-<div class="fg"><label>启用归档</label><select id="dryEnabled"><option value="1">开启</option><option value="0">关闭</option></select></div>
-<div class="fg"><label>最低评分门槛</label><input id="dryMinScore" type="number" min="5" max="10" step="0.5" value="8.0" style="max-width:100px"></div>
-<div class="fg"><label>归档文件夹名</label><input id="dryFolder" placeholder="highlights" style="max-width:200px"></div>
-</div>
-<div class="btn-grp"><button class="btn btn-pr" onclick="saveDry()">💾 保存归档设置</button><span id="dryMsg" style="font-size:11px;margin-left:8px"></span></div>
-</div>
-
 <!-- TUTOR (v2.0.3) -->
 <div class="page" id="pg-tutor">
-<div class="ph"><h1>🎓 知识辅导</h1><p>选择知识文件 → AI讲解/问答/二次创作/生成HTML</p></div>
+<div class="ph"><h1>知识辅导</h1><p>选择知识文件 → AI讲解/问答/二次创作/生成HTML</p></div>
 
-<div class="pc"><h3>📂 选择知识文件</h3>
+<div class="pc"><h3>选择知识文件</h3>
 <div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
 <select id="tutorFileSelect" multiple size="8" style="flex:1;min-width:250px;max-width:550px;padding:6px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);color:var(--text);font-size:12px">
 </select>
 <div style="display:flex;flex-direction:column;gap:5px">
-<button class="btn btn-pr btn-sm" onclick="tutorLoadFile()">📖 加载选中</button>
-<button class="btn btn-out btn-sm" onclick="tutorSelectAll()">☑ 全选</button>
-<button class="btn btn-out btn-sm" onclick="tutorSelectNone()">☐ 取消</button>
-<button class="btn btn-out btn-sm" onclick="rf_tutor()" style="margin-top:4px">🔄 刷新</button>
+<button class="btn btn-pr btn-sm" onclick="tutorLoadFile()">加载选中</button>
+<button class="btn btn-out btn-sm" onclick="tutorSelectAll()">全选</button>
+<button class="btn btn-out btn-sm" onclick="tutorSelectNone()">取消</button>
+<button class="btn btn-out btn-sm" onclick="rf_tutor()" style="margin-top:4px">刷新</button>
 </div>
 </div>
 <div id="tutorFileInfo" style="margin-top:8px;font-size:11px;color:var(--text2)"></div>
 <div class="btn-grp" id="tutorFileActions" style="margin-top:6px;display:none">
-<button class="btn btn-pr btn-sm" onclick="tutorLoadFile()">📖 加载选中</button>
-<button class="btn btn-out btn-sm" onclick="tutorSelectAll()">☑ 全选</button>
+<button class="btn btn-pr btn-sm" onclick="tutorLoadFile()">加载选中</button>
+<button class="btn btn-out btn-sm" onclick="tutorSelectAll()">全选</button>
 </div>
 </div>
 
 <div class="pc" id="tutorContentBox" style="display:none">
-<h3>📄 文件内容预览 <span style="font-size:10px;color:var(--text2);cursor:pointer" onclick="var p=document.getElementById('tutorContentPre');p.style.display=p.style.display==='none'?'block':'none'">[展开/折叠]</span></h3>
+<h3>文件内容预览 <span style="font-size:10px;color:var(--text2);cursor:pointer" onclick="var p=document.getElementById('tutorContentPre');p.style.display=p.style.display==='none'?'block':'none'">[展开/折叠]</span></h3>
 <pre id="tutorContentPre" style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);padding:12px;max-height:250px;overflow-y:auto;font-size:11px;color:var(--text2);white-space:pre-wrap;word-break:break-all;display:none"></pre>
 </div>
 
 <div class="pc" id="tutorChatBox" style="display:none">
-<h3>💬 AI 辅导对话</h3>
+<h3>AI 辅导对话</h3>
 <div id="tutorChatLog" style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);padding:12px;max-height:350px;overflow-y:auto;font-size:12px;margin-bottom:10px;min-height:100px">
 <div style="color:var(--text2);text-align:center;padding:20px">AI导师已就绪，开始提问吧！</div>
 </div>
 <div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap">
 <textarea id="tutorInput" placeholder="输入你的问题..." style="flex:1;min-width:180px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);color:var(--text);font-size:12px;padding:8px;resize:none;height:50px;font-family:inherit" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();tutorSend('chat')}"></textarea>
 <div style="display:flex;flex-direction:column;gap:4px">
-<button class="btn btn-pr btn-sm" onclick="tutorSend('chat')">📤 提问</button>
-<button class="btn btn-out btn-sm" onclick="tutorSend('rewrite')">✍️ 改写</button>
-<button class="btn btn-out btn-sm" onclick="tutorSend('html')">🎨 HTML</button>
+<button class="btn btn-pr btn-sm" onclick="tutorSend('chat')">提问</button>
+<button class="btn btn-out btn-sm" onclick="tutorSend('rewrite')">改写</button>
+<button class="btn btn-out btn-sm" onclick="tutorSend('html')">HTML</button>
 </div>
 </div>
 <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
@@ -834,7 +1009,7 @@ a{color:var(--accent)}
 </div>
 
 <div class="pc" id="tutorResultBox" style="display:none">
-<h3>📝 操作结果</h3>
+<h3>操作结果</h3>
 <div id="tutorResultContent" style="font-size:12px"></div>
 <div class="btn-grp" id="tutorResultActions" style="display:none"></div>
 </div>
@@ -843,28 +1018,28 @@ a{color:var(--accent)}
 <!-- SYSTEM -->
 
 <div class="page" id="pg-sys">
-<div class="ph"><h1>💾 系统管理</h1><p>备份 · 恢复 · 重置</p></div>
-<div class="pc"><h3>📤 导出配置</h3><p style="font-size:11px;color:var(--text2)">一键导出全部配置到 C:\bilibili_claw_backup</p>
-<button class="btn btn-pr" onclick="exportConfig()">📤 导出全部配置</button>
+<div class="ph"><h1>系统管理</h1><p>备份 · 恢复 · 重置</p></div>
+<div class="pc"><h3>导出配置</h3><p style="font-size:11px;color:var(--text2)">一键导出全部配置到 C:\bilibili_claw_backup</p>
+<button class="btn btn-pr" onclick="exportConfig()">导出全部配置</button>
 <div id="exportMsg" style="margin-top:8px;font-size:12px"></div>
 </div>
-<div class="pc"><h3>📥 导入配置</h3><p style="font-size:11px;color:var(--text2)">从备份文件恢复</p>
-<button class="btn btn-out" onclick="listBackups()">🔍 刷新备份列表</button>
+<div class="pc"><h3>导入配置</h3><p style="font-size:11px;color:var(--text2)">从备份文件恢复</p>
+<button class="btn btn-out" onclick="listBackups()">刷新备份列表</button>
 <div id="backupList" style="margin:10px 0;font-size:12px"></div>
 </div>
 <div class="pc danger-card">
-<h3 style="color:var(--red)">⚠ 恢复出厂设置</h3>
+<h3 style="color:var(--red)">恢复出厂设置</h3>
 <p style="font-size:11px;color:var(--text2)">清除所有配置、登录信息、数据文件。此操作不可逆！</p>
 <div class="fg"><label><input type="checkbox" id="resetKB"> 同时删除知识库目录</label></div>
-<button class="btn btn-dan" onclick="factoryReset()">🔥 恢复出厂设置</button>
+<button class="btn btn-dan" onclick="factoryReset()">恢复出厂设置</button>
 </div>
 </div>
 
 <!-- ABOUT -->
 <div class="page" id="pg-about">
-<div class="ph"><h1>ℹ️ 关于系统</h1><p>版本信息 · 技术栈 · 联系方式</p></div>
+<div class="ph"><h1>关于系统</h1><p>版本信息 · 技术栈 · 联系方式</p></div>
 <div class="pc" id="aboutBox"></div>
-<div class="notice">⚠ 免责声明：本项目仅供学习参考，若因使用本项目产生的任何后果，本人一律概不负责。</div>
+<div class="notice">免责声明：本项目仅供学习参考，若因使用本项目产生的任何后果，本人一律概不负责。</div>
 </div>
 
 </main>
@@ -872,6 +1047,31 @@ a{color:var(--accent)}
 <div class="toast" id="toast"></div>
 
 <script>
+function navIcon(name){
+var icons={
+dash:'<path d="M4 13h6V4H4z"/><path d="M14 20h6V4h-6z"/><path d="M4 20h6v-3H4z"/>',
+ctrl:'<circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/>',
+login:'<path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/>',
+conf:'<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1A2 2 0 1 1 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.6h.1a1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.6 1h.1a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.6 1z"/>',
+agent:'<path d="M12 3l7 4v5c0 5-3 8-7 9-4-1-7-4-7-9V7z"/><path d="M9 12h6"/><path d="M9 16h6"/><path d="M9 8h6"/>',
+mood:'<circle cx="12" cy="12" r="9"/><path d="M8 10h.01"/><path d="M16 10h.01"/><path d="M8 15c1.2 1 2.5 1.5 4 1.5s2.8-.5 4-1.5"/>',
+behavior:'<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>',
+upfu:'<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.8"/><path d="M16 3.2a4 4 0 0 1 0 7.6"/>',
+cmts:'<path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/>',
+usrs:'<circle cx="12" cy="7" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+mem:'<path d="M6 4h12a2 2 0 0 1 2 2v14l-4-2-4 2-4-2-4 2V6a2 2 0 0 1 2-2z"/><path d="M8 8h8"/><path d="M8 12h8"/>',
+diary:'<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>',
+acts:'<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
+tutor:'<path d="M22 10L12 5 2 10l10 5 10-5z"/><path d="M6 12v5c2 2 10 2 12 0v-5"/>',
+tools:'<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4z"/><path d="M15 5l4 4"/>',
+sys:'<path d="M4 4h16v16H4z"/><path d="M9 9h6v6H9z"/><path d="M9 1v3"/><path d="M15 1v3"/><path d="M9 20v3"/><path d="M15 20v3"/><path d="M20 9h3"/><path d="M20 15h3"/><path d="M1 9h3"/><path d="M1 15h3"/>',
+about:'<circle cx="12" cy="12" r="9"/><path d="M12 10v6"/><path d="M12 7h.01"/>'
+};
+return '<svg viewBox="0 0 24 24" aria-hidden="true">'+(icons[name]||icons.about)+'</svg>';
+}
+function initNavIcons(){
+document.querySelectorAll('.nav-ico[data-icon]').forEach(function(el){el.innerHTML=navIcon(el.getAttribute('data-icon'))});
+}
 // ── NAV ──
 function nav(p,el){
 document.querySelectorAll('.page').forEach(x=>x.classList.remove('on'));
@@ -913,18 +1113,18 @@ async function rf_dash(){
 try{
 var d=await api('GET','/api/info');
 var h='';
-h+='<div class="sc"><div class="si bl">🤖</div><div><div class="sv">'+(d.bot_running?'运行中':'已停止')+'</div><div class="sl">机器人状态</div></div></div>';
-h+='<div class="sc"><div class="si gn">🔑</div><div><div class="sv">'+(d.bili_logged_in?'已登录':'未登录')+'</div><div class="sl">B站认证</div></div></div>';
-h+='<div class="sc"><div class="si or">⚙️</div><div><div class="sv">'+(d.config_sections||0)+'</div><div class="sl">配置项</div></div></div>';
-h+='<div class="sc"><div class="si pk">⏱</div><div><div class="sv" id="puptime">--</div><div class="sl">运行时长</div></div></div>';
-h+='<div class="sc"><div class="si pp">📦</div><div><div class="sv">'+(d.data_files||0)+'</div><div class="sl">数据文件</div></div></div>';
-h+='<div class="sc" id="asrDashCard"><div class="si '+(d.asr_enabled?'gn':'rd')+'">🎙️</div><div><div class="sv">'+(d.asr_enabled?'开启':'关闭')+'</div><div class="sl">ASR语音识别</div></div></div>';
+h+='<div class="sc"><div class="si bl">'+navIcon('agent')+'</div><div><div class="sv">'+(d.bot_running?'运行中':'已停止')+'</div><div class="sl">机器人状态</div></div></div>';
+h+='<div class="sc"><div class="si gn">'+navIcon('login')+'</div><div><div class="sv">'+(d.bili_logged_in?'已登录':'未登录')+'</div><div class="sl">B站认证</div></div></div>';
+h+='<div class="sc"><div class="si or">'+navIcon('conf')+'</div><div><div class="sv">'+(d.config_sections||0)+'</div><div class="sl">配置项</div></div></div>';
+h+='<div class="sc"><div class="si pk">'+navIcon('ctrl')+'</div><div><div class="sv" id="puptime">--</div><div class="sl">运行时长</div></div></div>';
+h+='<div class="sc"><div class="si pp">'+navIcon('sys')+'</div><div><div class="sv">'+(d.data_files||0)+'</div><div class="sl">数据文件</div></div></div>';
+h+='<div class="sc" id="asrDashCard"><div class="si '+(d.asr_enabled?'gn':'rd')+'">'+navIcon('tutor')+'</div><div><div class="sv">'+(d.asr_enabled?'开启':'关闭')+'</div><div class="sl">ASR语音识别</div></div></div>';
 document.getElementById('dashStats').innerHTML=h;
 document.getElementById('puptime').textContent=d.uptime;
 
 var dot=document.getElementById('botDot');dot.className='dot '+(d.bot_running?'on':'off');
 var bd='<table class="tb"><tr><th>项目</th><th>值</th><th>项目</th><th>值</th></tr>';
-bd+='<tr><td>运行状态</td><td><span class="tg '+(d.bot_running?'tg-suc':'tg-war')+'">'+(d.bot_running?'● 运行中':'○ 已停止')+'</span></td><td>启动时间</td><td>'+(d.bot_start_time||'-')+'</td></tr>';
+bd+='<tr><td>运行状态</td><td><span class="tg '+(d.bot_running?'tg-suc':'tg-war')+'">'+(d.bot_running?'运行中':'已停止')+'</span></td><td>启动时间</td><td>'+(d.bot_start_time||'-')+'</td></tr>';
 bd+='<tr><td>API状态</td><td><span class="tg '+(d.api_configured?'tg-suc':'tg-dan')+'">'+(d.api_configured?'已配置':'未配置')+'</span></td>';
 if(d.mood)bd+='<td>心情 / 精力</td><td>'+(d.mood.mood||'-')+' / '+(d.mood.energy||'?')+'</td>';
 else bd+='<td>心情</td><td>-</td>';
@@ -978,7 +1178,7 @@ userScrolledUp=!atBottom;
 }
 async function upCtrlUI(){
 var d=await api('GET','/api/info');
-document.getElementById('ctrlStatus').innerHTML=d.bot_running?'<span class="tg tg-suc pulse">● 运行中</span> 自 '+d.bot_start_time:'<span class="tg tg-war">○ 已停止</span>';
+document.getElementById('ctrlStatus').innerHTML=d.bot_running?'<span class="tg tg-suc pulse">运行中</span> 自 '+d.bot_start_time:'<span class="tg tg-war">已停止</span>';
 document.getElementById('btnStart').style.display=d.bot_running?'none':'';
 document.getElementById('btnStop').style.display=d.bot_running?'':'none';
 }
@@ -1018,15 +1218,15 @@ try{
 var d=await api('GET','/api/info');
 var ci=document.getElementById('cookieInfo');
 if(d.bili_logged_in){
-document.getElementById('loginStatus').innerHTML='<span class="tg tg-suc">✅ 已登录B站</span>';
+document.getElementById('loginStatus').innerHTML='<span class="tg tg-suc">已登录B站</span>';
 ci.innerHTML='Cookie 文件: Data/bilibili_cookies.json';
-document.getElementById('btnQR').textContent='🔄 重新登录';
+document.getElementById('btnQR').innerHTML='<span class="nav-ico" data-icon="login"></span>重新登录';initNavIcons();
 document.getElementById('btnLogout').style.display='';
 document.getElementById('loginBadge').style.display='';
 } else {
-document.getElementById('loginStatus').innerHTML='<span class="tg tg-war">❌ 未登录</span>';
+document.getElementById('loginStatus').innerHTML='<span class="tg tg-war">未登录</span>';
 ci.innerHTML='尚未登录B站账号';
-document.getElementById('btnQR').textContent='📷 生成登录二维码';
+document.getElementById('btnQR').innerHTML='<span class="nav-ico" data-icon="login"></span>生成登录二维码';initNavIcons();
 document.getElementById('btnLogout').style.display='none';
 document.getElementById('loginBadge').style.display='none';
 }
@@ -1034,7 +1234,7 @@ document.getElementById('loginBadge').style.display='none';
 }
 async function startQRLogin(){
 document.getElementById('qrArea').style.display='block';
-document.getElementById('qrStatusText').textContent='⏳ 正在生成二维码...';
+document.getElementById('qrStatusText').textContent='正在生成二维码...';
 document.getElementById('qrImg').src='';
 var r=await api('POST','/api/bili/qr/start');
 if(!r.ok){toast(r.message,'err');return}
@@ -1064,26 +1264,140 @@ var r=await api('POST','/api/bili/logout');toast(r.message,r.ok?'ok':'err');chec
 }
 
 // ── CONFIG ──
+var _configCache={};
 function rf_conf(){loadConf()}
-async function loadConf(){try{var r=await api('GET','/api/config');document.getElementById('confEd').value=JSON.stringify(r,null,2)}catch(e){toast('加载失败','err')}}
-async function saveConf(){try{var v=JSON.parse(document.getElementById('confEd').value);var r=await api('POST','/api/config',v);toast(r.message,r.ok?'ok':'err')}catch(e){toast('JSON格式错误: '+e.message,'err')}}
+function switchConfTab(name,el){
+document.querySelectorAll('.config-panel').forEach(function(x){x.classList.remove('on')});
+document.querySelectorAll('#confTabs .tab-btn').forEach(function(x){x.classList.remove('on')});
+var p=document.getElementById('cfg-'+name);if(p)p.classList.add('on');
+if(el)el.classList.add('on');
+if(name==='json')syncJsonFromVisualConfig();
+}
+function cfgGet(obj,path,def){
+var cur=obj||{},parts=path.split('.');
+for(var i=0;i<parts.length;i++){if(cur==null||typeof cur!=='object'||!(parts[i] in cur))return def;cur=cur[parts[i]]}
+return cur==null?def:cur;
+}
+function cfgSet(obj,path,val){
+var cur=obj,parts=path.split('.');
+for(var i=0;i<parts.length-1;i++){var k=parts[i];if(!cur[k]||typeof cur[k]!=='object'||Array.isArray(cur[k]))cur[k]={};cur=cur[k]}
+cur[parts[parts.length-1]]=val;
+}
+function cfgReadValue(el){
+if(el.type==='checkbox')return el.checked;
+if(el.dataset.cfgType==='bool')return el.value==='true';
+if(el.type==='number')return el.step&&el.step!=='1'?(parseFloat(el.value)||0):(parseInt(el.value)||0);
+return el.value;
+}
+function safeLogoSvg(svg){
+svg=(svg||'').trim();
+if(!svg||svg.length>20000||!/^<svg[\s>]/i.test(svg))return '';
+if(/<\s*script\b/i.test(svg)||/<\s*foreignObject\b/i.test(svg)||/\son[a-z]+\s*=/i.test(svg)||/javascript\s*:/i.test(svg)||/data\s*:\s*text\/html/i.test(svg))return '';
+return svg;
+}
+function fallbackLogoSvg(txt){
+txt=esc((txt||'BL').slice(0,8));
+return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180"><rect width="180" height="180" rx="40" fill="#141413"/><text x="90" y="108" text-anchor="middle" font-size="72" font-family="Arial, sans-serif" font-weight="700" fill="#faf9f5">'+txt+'</text></svg>';
+}
+function logoDataUri(site){
+site=site||{};
+var txt=(site.logo_text||'BL').slice(0,8);
+var svg=safeLogoSvg(site.logo_svg)||fallbackLogoSvg(txt);
+return 'data:image/svg+xml;charset=utf-8,'+encodeURIComponent(svg);
+}
+function renderLogoMark(el,site){
+if(!el)return;
+site=site||{};
+var txt=(site.logo_text||'BL').slice(0,8);
+var svg=safeLogoSvg(site.logo_svg);
+if(svg)el.innerHTML=svg;
+else el.textContent=txt;
+}
+function syncVisualConfigFromJson(){
+document.querySelectorAll('[data-cfg-path]').forEach(function(el){
+var val=cfgGet(_configCache,el.dataset.cfgPath,'');
+if(el.type==='checkbox')el.checked=!!val;
+else if(el.dataset.cfgType==='bool')el.value=val?'true':'false';
+else el.value=val==null?'':val;
+});
+previewSiteLogo();
+renderAgentSettings(_configCache);
+}
+function syncJsonFromVisualConfig(){
+document.querySelectorAll('[data-cfg-path]').forEach(function(el){cfgSet(_configCache,el.dataset.cfgPath,cfgReadValue(el))});
+document.getElementById('confEd').value=JSON.stringify(_configCache,null,2);
+}
+async function loadConf(){
+try{
+var r=await api('GET','/api/config');
+_configCache=r||{};
+document.getElementById('confEd').value=JSON.stringify(_configCache,null,2);
+syncVisualConfigFromJson();
+document.getElementById('confMsg').textContent='已加载';
+}catch(e){toast('加载失败','err')}
+}
+async function saveConf(){
+try{
+if(document.getElementById('cfg-json').classList.contains('on'))_configCache=JSON.parse(document.getElementById('confEd').value);
+else syncJsonFromVisualConfig();
+var r=await api('POST','/api/config',_configCache);
+toast(r.message,r.ok?'ok':'err');
+document.getElementById('confMsg').textContent=r.ok?'已保存':'保存失败';
+if(r.ok)applySiteLogo(_configCache.site||{});
+}catch(e){toast('配置格式错误: '+e.message,'err')}
+}
+function previewSiteLogo(){
+var prev=document.getElementById('siteLogoPreview');if(!prev)return;
+var svg=document.getElementById('siteLogoSvg').value.trim();
+var txt=(document.getElementById('siteLogoText').value.trim()||'BL').slice(0,8);
+renderLogoMark(prev,{logo_text:txt,logo_svg:svg});
+}
+function applySiteLogo(site){
+site=site||{};
+var txt=(site.logo_text||'BL').slice(0,8);
+var brand=site.brand_name||'B站 AI 管理系统';
+var mark=document.getElementById('siteLogoMark'),name=document.getElementById('siteBrandName');
+renderLogoMark(mark,site);
+if(name)name.textContent=brand;
+var href=logoDataUri(site);
+document.querySelectorAll('link[rel="icon"],link[rel="apple-touch-icon"]').forEach(function(link){link.href=href});
+}
+function renderAgentSettings(cfg){
+var a=(cfg&&cfg.agent)||{},v=(cfg&&cfg.video)||{},auto=(cfg&&cfg.automation)||{},models=(cfg&&cfg.models)||{};
+var rows=[
+['Agent启用',a.enabled?'开启':'关闭'],['自动运行',a.auto_enabled?'开启':'关闭'],['深度搜索',a.dive_enabled?'开启':'关闭'],
+['计划步骤',a.max_steps_per_plan||'-'],['搜索结果',a.max_search_results||'-'],['计划视频数',a.max_videos_per_plan||'-'],
+['自动最低分',a.auto_min_score||'-'],['冷却分钟',a.cooldown_minutes||'-'],['视频理解',v.mode||'-'],
+['最长视频',v.max_duration_seconds? v.max_duration_seconds+' 秒':'-'],['Chat模型',models.chat||cfgGet(cfg,'api.model_brain','-')],['Vision模型',models.vision||cfgGet(cfg,'api.model_vision','-')],
+['主动学习',auto.enable_proactive?'开启':'关闭'],['Web Search',auto.enable_web_search?'开启':'关闭'],['每日动作',auto.max_daily_actions||'-']
+];
+var h='';
+for(var i=0;i<rows.length;i++)h+='<div class="setting-card"><strong>'+esc(String(rows[i][0]))+'</strong><span>'+esc(String(rows[i][1]))+'</span></div>';
+var box=document.getElementById('agentSettingsGrid');if(box)box.innerHTML=h;
+}
 
 // ── PERSONA ──
 async function rf_psna(){
 try{
-var r=await api('GET','/api/personas');var h='',items=r.items||{},act=r.active||'';
+var r=await api('GET','/api/personas');var h='',items=r.items||{},act=r.active||'',sel='';
 for(var n in items){
 var p=items[n],isA=n===act;
-h+=`<div class="pc"><h3>${isA?'<span class="tg tg-suc">● 活跃</span> ':''}${n}</h3><div style="font-size:11px;color:var(--text2)">风格：${p.style||'-'} | 规则：${(p.rules||[]).length}条</div><div class="btn-grp">${isA?'':'<button class="btn btn-sm btn-pr" onclick="actPsna(\''+n+'\')">启用</button>'}<button class="btn btn-sm btn-out" onclick="delPsna(\''+n+'\')" ${Object.keys(items).length<2?'disabled':''}>删除</button></div></div>`;
+h+=`<div class="persona-item ${isA?'active':''}"><h3>${isA?'<span class="tg tg-suc">活跃</span> ':''}${esc(n)}</h3><div style="font-size:11px;color:var(--text2);line-height:1.7">风格：${esc(p.style||'-')}<br>规则：${(p.rules||[]).length} 条</div><div class="btn-grp">${isA?'':'<button class="btn btn-sm btn-pr" onclick="actPsna(\''+n+'\')">启用</button>'}<button class="btn btn-sm btn-out" onclick="delPsna(\''+n+'\')" ${Object.keys(items).length<2?'disabled':''}>删除</button></div></div>`;
+sel+='<option value="'+esc(n)+'" '+(isA?'selected':'')+'>'+esc(n)+'</option>';
 }
-h+=`<div class="pc"><h3>➕ 新建人设</h3><div class="fg"><label>名称</label><input id="npName" placeholder="如: 毒舌模式"></div><div class="fg"><label>系统Prompt</label><textarea id="npPrompt" placeholder="你是..."></textarea></div><div class="fg"><label>风格</label><input id="npStyle" placeholder="幽默、犀利"></div><button class="btn btn-pr" onclick="addPsna()">创建</button></div>`;
-document.getElementById('psnaList').innerHTML=h;
+document.getElementById('psnaList').innerHTML=h||'<div class="emp">暂无人设</div>';
+var ps=document.getElementById('agentPersonaSelect');if(ps)ps.innerHTML=sel;
+var active=items[act]||{};
+document.getElementById('activePersonaDetail').innerHTML='<div class="setting-card"><strong>'+esc(act||'-')+'</strong><span>'+esc(active.system_prompt||'未设置系统 Prompt')+'</span></div><div class="setting-card" style="margin-top:10px"><strong>表达风格</strong><span>'+esc(active.style||'-')+'</span></div><div class="setting-card" style="margin-top:10px"><strong>行为边界</strong><span>'+esc((active.rules||[]).join(' / ')||'-')+'</span></div>';
+if(!Object.keys(_configCache||{}).length){try{_configCache=await api('GET','/api/config')}catch(e){}}
+renderAgentSettings(_configCache);
 }catch(e){}
 }
 async function addPsna(){
-var n=document.getElementById('npName').value.trim(),p=document.getElementById('npPrompt').value.trim(),s=document.getElementById('npStyle').value.trim();
+var n=document.getElementById('npName').value.trim(),p=document.getElementById('npPrompt').value.trim(),s=document.getElementById('npStyle').value.trim(),o=document.getElementById('npOwner').value.trim();
 if(!n){toast('请输入名称','err');return}
-var r=await api('POST','/api/personas',{name:n,system_prompt:p,style:s});toast(r.message,r.ok?'ok':'err');if(r.ok)rf_psna()
+var rules=document.getElementById('npRules').value.split(/\n/).map(function(x){return x.trim()}).filter(Boolean);
+var r=await api('POST','/api/personas',{name:n,system_prompt:p,style:s,owner_prompt:o,rules:rules});toast(r.message,r.ok?'ok':'err');if(r.ok)rf_psna()
 }
 async function actPsna(n){var r=await api('POST','/api/personas/activate',{name:n});toast(r.message,r.ok?'ok':'err');if(r.ok)rf_psna()}
 async function delPsna(n){if(!confirm('删除"'+n+'"？'))return;var r=await api('DELETE','/api/personas/'+encodeURIComponent(n));toast(r.message,r.ok?'ok':'err');if(r.ok)rf_psna()}
@@ -1092,7 +1406,7 @@ async function delPsna(n){if(!confirm('删除"'+n+'"？'))return;var r=await api
 async function rf_cmts(){
 try{
 var r=await api('GET','/api/comments?limit=50'),its=r.items||[];
-if(!its.length){document.getElementById('cmtTab').innerHTML='<div class="emp"><div class="ic">💬</div>暂无评论记录</div>';return}
+if(!its.length){document.getElementById('cmtTab').innerHTML=emptyState('cmts','暂无评论记录');return}
 var h='<table class="tb"><tr><th>时间</th><th>类型</th><th>内容</th><th>来源</th><th>状态</th></tr>';
 for(var i=0;i<its.length;i++){var c=its[i];h+=`<tr><td>${c.time||'-'}</td><td><span class="tg tg-inf">${c.type||'-'}</span></td><td title="${esc(c.content||'')}">${(c.content||'').substring(0,50)}</td><td>${c.source||'-'}</td><td>${c.executed?'<span class="tg tg-suc">已执行</span>':'<span class="tg tg-war">草稿</span>'}</td></tr>`}
 h+='</table>';document.getElementById('cmtTab').innerHTML=h;
@@ -1103,7 +1417,7 @@ h+='</table>';document.getElementById('cmtTab').innerHTML=h;
 async function rf_usrs(){
 try{
 var r=await api('GET','/api/users'),u=r.users||{},ks=Object.keys(u);
-if(!ks.length){document.getElementById('usrTab').innerHTML='<div class="emp"><div class="ic">👤</div>暂无用户画像</div>';return}
+if(!ks.length){document.getElementById('usrTab').innerHTML=emptyState('usrs','暂无用户画像');return}
 var h='<table class="tb"><tr><th>用户</th><th>好感度</th><th>关系</th><th>最近印象</th><th>更新时间</th></tr>';
 for(var k in u){var p=u[k],a=parseInt(p.affinity)||0,cl=a>=80?'tg-suc':a>=45?'tg-inf':a<=-40?'tg-dan':'tg-war';
 h+=`<tr><td>${p.name||k}</td><td><span class="tg ${cl}">${a}</span></td><td>${rel(a)}</td><td>${(p.notes||[]).slice(-2).join('；').substring(0,35)||'-'}</td><td>${p.updated_at||'-'}</td></tr>`}
@@ -1117,16 +1431,16 @@ async function rf_mem(){
 try{
 var r=await api('GET','/api/memory'),h='';
 if(r.diary&&r.diary.entries&&r.diary.entries.length){
-h+='<div class="pc"><h3>📖 日记 ('+r.diary.entries.length+'条)</h3>';
+h+='<div class="pc"><h3>日记 ('+r.diary.entries.length+'条)</h3>';
 var es=r.diary.entries.slice(-15).reverse();
 for(var i=0;i<es.length;i++){var d=es[i];h+=`<div style="padding:8px;margin:4px 0;background:var(--bg3);border-radius:6px;font-size:11px"><strong>${d.time||''} ${d.mood||''}</strong><div style="color:var(--text2)">${(d.content||'').substring(0,180)}</div></div>`}
 h+='</div>'}
 if(r.evolution&&r.evolution.events&&r.evolution.events.length){
-h+='<div class="pc"><h3>🧬 进化事件 ('+r.evolution.events.length+'条)</h3>';
+h+='<div class="pc"><h3>进化事件 ('+r.evolution.events.length+'条)</h3>';
 var evs=r.evolution.events.slice(-15).reverse();
 for(var i=0;i<evs.length;i++){var e=evs[i];h+=`<div style="font-size:11px;color:var(--text2);margin:2px 0">${e.time||''} [${e.type||''}] ${(e.detail||'').substring(0,120)}</div>`}
 h+='</div>'}
-document.getElementById('memBox').innerHTML=h||'<div class="emp"><div class="ic">🧠</div>暂无记忆数据</div>';
+document.getElementById('memBox').innerHTML=h||emptyState('mem','暂无记忆数据');
 }catch(e){}
 }
 
@@ -1135,16 +1449,16 @@ async function rf_diary(){
 try{
 var r=await api('GET','/api/diary'),h='';
 if(r.diary&&r.diary.entries&&r.diary.entries.length){
-h+='<div class="pc"><h3>📖 日记</h3>';
+h+='<div class="pc"><h3>日记</h3>';
 var es=r.diary.entries.slice(-20).reverse();
 for(var i=0;i<es.length;i++){var d=es[i];h+=`<div style="border-bottom:1px solid var(--border);padding:8px 0"><div style="font-size:10px;color:var(--accent)">${d.time||''} · ${d.mood||''} · 精力${d.energy||'?'}</div><div style="font-size:11px;line-height:1.4">${(d.content||'').substring(0,200)}</div></div>`}
 h+='</div>'}
 if(r.evolution&&r.evolution.events&&r.evolution.events.length){
-h+='<div class="pc"><h3>🧬 进化</h3><table class="tb"><tr><th>时间</th><th>类型</th><th>详情</th></tr>';
+h+='<div class="pc"><h3>进化</h3><table class="tb"><tr><th>时间</th><th>类型</th><th>详情</th></tr>';
 var evs=r.evolution.events.slice(-20).reverse();
 for(var i=0;i<evs.length;i++){var e=evs[i];h+=`<tr><td>${e.time||'-'}</td><td>${e.type||'-'}</td><td style="max-width:260px">${(e.detail||'').substring(0,120)}</td></tr>`}
 h+='</table></div>'}
-document.getElementById('diaryBox').innerHTML=h||'<div class="emp"><div class="ic">📖</div>暂无数据</div>';
+document.getElementById('diaryBox').innerHTML=h||emptyState('diary','暂无数据');
 }catch(e){}
 }
 
@@ -1152,7 +1466,7 @@ document.getElementById('diaryBox').innerHTML=h||'<div class="emp"><div class="i
 async function rf_acts(){
 try{
 var r=await api('GET','/api/actions?limit=40'),its=r.items||[];
-if(!its.length){document.getElementById('actTab').innerHTML='<div class="emp"><div class="ic">📋</div>暂无操作日志</div>';return}
+if(!its.length){document.getElementById('actTab').innerHTML=emptyState('acts','暂无操作日志');return}
 var h='<table class="tb"><tr><th>时间</th><th>操作</th><th>详情</th><th>状态</th></tr>';
 for(var i=0;i<its.length;i++){var a=its[i];h+=`<tr><td>${a.time||'-'}</td><td>${a.action||'-'}</td><td title="${esc(JSON.stringify(a.payload||{}))}">${JSON.stringify(a.payload||{}).substring(0,60)}</td><td>${a.executed?'<span class="tg tg-suc">已执行</span>':'<span class="tg tg-war">草稿</span>'}</td></tr>`}
 h+='</table>';document.getElementById('actTab').innerHTML=h;
@@ -1180,6 +1494,7 @@ document.getElementById('aboutBox').innerHTML=`<div style="display:grid;grid-tem
 
 // ── UTIL ──
 function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function emptyState(icon,text){return '<div class="emp"><div class="ic">'+navIcon(icon)+'</div>'+esc(text)+'</div>'}
 
 // ── AUTO REFRESH ──
 var autoTmr=null;
@@ -1241,7 +1556,7 @@ for(var i=0;i<radios.length;i++){if(radios[i].value===cm)radios[i].checked=true}
 async function toggleAiMarker(){
 var cb=document.getElementById("aiMarkerOn");
 if(!cb.checked){
-if(confirm("⚠️ 确定要关闭AI免责声明吗？\n\n关闭后，所有评论和私信回复将不再标注AI身份。\n这可能导致平台审核风险。\n\n再次点击设置中的开关可以重新开启。")){
+if(confirm("确定要关闭AI免责声明吗？\n\n关闭后，所有评论和私信回复将不再标注AI身份。\n这可能导致平台审核风险。\n\n再次点击设置中的开关可以重新开启。")){
 _aiMarkerConfirmed=true;
 }else{
 cb.checked=true;
@@ -1299,7 +1614,7 @@ toast(r.message,r.ok?"ok":"err");
 	if(!_safetyLoaded){await fetchSafety();}
 	var cb=document.getElementById("safetyEnabled");
 	if(!cb.checked){
-	if(!confirm("⚠ 确定要关闭关键词安全校验吗？\n\n关闭后AI将不再过滤任何评论和回复。\n这可能导致账号风险。\n\n你可以随时在设置中重新开启。")){
+	if(!confirm("确定要关闭关键词安全校验吗？\n\n关闭后AI将不再过滤任何评论和回复。\n这可能导致账号风险。\n\n你可以随时在设置中重新开启。")){
 	cb.checked=true;
 	return;
 	}
@@ -1332,10 +1647,10 @@ toast(r.message,r.ok?"ok":"err");
 // ── UPFOLLOW ──
 async function rf_upfu(){
 try{var r=await api("GET","/api/up-follow/list");var its=r.items||[];
-if(!its.length){document.getElementById("upfuTab").innerHTML="<div class=\"emp\"><div class=\"ic\">👥</div>暂无已关注的UP主</div>";return}
+if(!its.length){document.getElementById("upfuTab").innerHTML=emptyState('upfu','暂无已关注的UP主');return}
 its.sort(function(a,b){return (b.avg_score||0)-(a.avg_score||0)});
 var h="<table class=\"tb\"><tr><th>#</th><th>UP主</th><th>UID</th><th>评分</th><th>印象次数</th><th>关注时间</th></tr>";
-for(var i=0;i<its.length;i++){var u=its[i];h+="<tr><td>"+(i+1)+"</td><td>"+(u.favorited?"⭐ ":"")+u.name+"</td><td class=\"mono\">"+u.uid+"</td><td>"+(u.avg_score||"-")+"</td><td>"+(u.impressions||0)+"</td><td>"+(u.followed_at||"-")+"</td></tr>"}
+for(var i=0;i<its.length;i++){var u=its[i];h+="<tr><td>"+(i+1)+"</td><td>"+(u.favorited?"已关注 · ":"")+u.name+"</td><td class=\"mono\">"+u.uid+"</td><td>"+(u.avg_score||"-")+"</td><td>"+(u.impressions||0)+"</td><td>"+(u.followed_at||"-")+"</td></tr>"}
 h+="</table>";document.getElementById("upfuTab").innerHTML=h}catch(e){}}
 
 // ── TOOLS ──
@@ -1352,7 +1667,9 @@ var r=await api("POST","/api/action/analyze-video",{bvid:b});toast(r.message,r.o
 async function runAgent(){
 var g=document.getElementById("agentGoal").value.trim();
 if(!g){toast("请输入目标描述","err");return}
-var r=await api("POST","/api/action/agent-skill",{goal:g});toast(r.message,r.ok?"ok":"err")}
+var persona=document.getElementById("agentPersonaSelect")?document.getElementById("agentPersonaSelect").value:"";
+var mode=document.getElementById("agentMode")?document.getElementById("agentMode").value:"queue";
+var r=await api("POST","/api/action/agent-skill",{goal:g,persona:persona,mode:mode});toast(r.message,r.ok?"ok":"err")}
 async function kbOrganize(){
 if(!confirm("将对知识库进行AI自动分类整理，继续？"))return;
 var r=await api("POST","/api/action/kb-organize");toast(r.message,"ok")}
@@ -1406,7 +1723,7 @@ if(!confirm("确定恢复出厂设置？此操作不可逆！\n将删除所有�
 // 🔒 服务端两步确认
 var req=await api("POST","/api/factory-reset/request");
 if(!req.ok){toast(req.message,"err");return}
-var token=prompt("⚠ 最后确认：输入确认令牌以执行\n\n令牌: "+req.token+"\n（直接复制粘贴上面的令牌）");
+var token=prompt("最后确认：输入确认令牌以执行\n\n令牌: "+req.token+"\n（直接复制粘贴上面的令牌）");
 if(!token||token!==req.token){toast("令牌不匹配，已取消","err");return}
 var delKB=document.getElementById("resetKB").checked;
 if(delKB&&!confirm("同时删除知识库目录？此操作不可逆！"))return;
@@ -1470,11 +1787,11 @@ if(mode=="html")msg=msg||"请生成知识讲解网页。";
 
 var log=document.getElementById("tutorChatLog");
 if(mode=="chat"){
-log.innerHTML+='<div style="margin-bottom:8px"><span style="color:var(--accent);font-weight:600">💬 你:</span> '+esc(msg)+'</div>';
+log.innerHTML+='<div style="margin-bottom:8px"><span style="color:var(--accent);font-weight:600">你:</span> '+esc(msg)+'</div>';
 inp.value="";
 }
 var stat=document.getElementById("tutorStatus");
-stat.textContent="⏳ AI思考中...";
+stat.textContent="AI思考中...";
 
 try{
 var r=await api("POST","/api/kb/tutor-chat",{
@@ -1482,13 +1799,13 @@ rel_paths:_tutorRelPaths, message:msg,
 history:_tutorHistory, mode:mode,
 style:document.getElementById("tutorHtmlStyle").value
 });
-if(!r.ok){stat.textContent="";toast(r.message,"err");log.innerHTML+='<div style="color:var(--red);margin-bottom:8px">❌ '+esc(r.message)+'</div>';return}
+if(!r.ok){stat.textContent="";toast(r.message,"err");log.innerHTML+='<div style="color:var(--red);margin-bottom:8px">'+esc(r.message)+'</div>';return}
 stat.textContent="";
 
 if(mode=="chat"){
 _tutorHistory.push({role:"user",content:msg},{role:"assistant",content:r.reply});
 if(_tutorHistory.length>20)_tutorHistory=_tutorHistory.slice(-20);
-	log.innerHTML+='<div style="margin-bottom:10px;background:var(--bg3);border-left:3px solid var(--accent);padding:8px 12px;border-radius:4px"><span style="color:var(--accent2);font-weight:600">🎓 导师:</span> '+r.reply.replace(/\n/g,"<br>")+'</div>';
+	log.innerHTML+='<div style="margin-bottom:10px;background:var(--bg3);border-left:3px solid var(--accent);padding:8px 12px;border-radius:4px"><span style="color:var(--accent2);font-weight:600">导师:</span> '+r.reply.replace(/\n/g,"<br>")+'</div>';
 log.scrollTop=log.scrollHeight;
 }else if(mode=="rewrite"){
 var rb=document.getElementById("tutorResultBox");
@@ -1497,7 +1814,7 @@ rc.innerHTML='<div style="background:rgba(76,175,124,.08);border:1px solid rgba(
 rb.style.display="";
 var ra=document.getElementById("tutorResultActions");
 ra.style.display="";
-ra.innerHTML='<button class="btn btn-suc" onclick="tutorSaveRewrite()">💾 保存改写（覆盖原文件）</button>';
+ra.innerHTML='<button class="btn btn-suc" onclick="tutorSaveRewrite()">保存改写（覆盖原文件）</button>';
 window._tutorRewriteContent=r.new_content||"";
 }else if(mode=="html"){
 var rb=document.getElementById("tutorResultBox");
@@ -1506,7 +1823,7 @@ rc.innerHTML='<div style="background:rgba(91,141,239,.08);border:1px solid rgba(
 rb.style.display="";
 var ra=document.getElementById("tutorResultActions");
 ra.style.display="";
-ra.innerHTML='<button class="btn btn-pr" onclick="tutorSaveHtml()">💾 保存HTML文件</button> <button class="btn btn-out" onclick="tutorPreviewHtml()">👁 预览HTML</button>';
+ra.innerHTML='<button class="btn btn-pr" onclick="tutorSaveHtml()">保存HTML文件</button> <button class="btn btn-out" onclick="tutorPreviewHtml()">预览HTML</button>';
 window._tutorHtmlContent=r.html||"";
 }
 }catch(e){stat.textContent="";toast("请求失败: "+e.message,"err")}
@@ -1535,7 +1852,7 @@ else{toast("请允许弹窗以预览HTML","err")}
 }
 
 // ── INIT ──
-rf_dash();auto();
+initNavIcons();rf_dash();auto();
 (async function(){try{var d=await api('GET','/api/info');document.getElementById('uptime').textContent=d.uptime}catch(e){}})();
 </script>
 </body>
@@ -1552,6 +1869,7 @@ def index():
 @app.route('/api/info')
 def api_info():
     config = read_json(CONFIG_FILE)
+    site = _site_branding(config)
     mood = read_json(DATA_DIR / "mood_state.json") or read_json(DATA_DIR / "web_mood.json")
     persona = read_json(DATA_DIR / "web_personas.json") or read_json(DATA_DIR / "personas.json")
     costs = read_json(DATA_DIR / "web_costs.json")
@@ -1586,6 +1904,7 @@ def api_info():
         cwd=str(BASE_DIR),
         asr_enabled=config.get('asr', {}).get('enabled', False),
         asr_backend=config.get('asr', {}).get('backend', 'funasr'),
+        site=dict(logo_text=site['logo_text'], brand_name=site['brand_name']),
     ))
 
 # ── 配置 ──
@@ -1595,6 +1914,10 @@ def api_config():
         return jsonify(read_json(CONFIG_FILE))
     try:
         data = request.get_json(force=True)
+        if isinstance(data, dict):
+            site = data.get('site')
+            if isinstance(site, dict):
+                site['logo_svg'] = _sanitize_logo_svg(site.get('logo_svg') or '')
         ok = write_json(CONFIG_FILE, data)
         return jsonify(dict(ok=ok, message='配置已保存' if ok else '保存失败'))
     except Exception as e:
@@ -2112,11 +2435,13 @@ def api_action_agent_skill():
     try:
         body = request.get_json(force=True)
         goal = (body.get('goal') or '').strip()
+        persona = (body.get('persona') or '').strip()
+        mode = (body.get('mode') or 'queue').strip()
         if not goal:
             return jsonify(dict(ok=False, message='请输入目标描述')), 400
         task_file = DATA_DIR / "web_action_queue.json"
         tasks = read_json(task_file, [])
-        tasks.append(dict(type='agent_skill', goal=goal, time=datetime.now().isoformat()))
+        tasks.append(dict(type='agent_skill', goal=goal, persona=persona, mode=mode, time=datetime.now().isoformat()))
         write_json(task_file, tasks)
         log_line(f"Agent技能已排队: {goal}")
         return jsonify(dict(ok=True, message=f'Agent任务已加入队列: {goal}'))
