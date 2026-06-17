@@ -48,7 +48,7 @@ check_and_install "httpx" "httpx"
 check_and_install "qrcode" "qrcode"
 check_and_install "Pillow" "PIL"
 check_and_install "colorama" "colorama"
-check_and_install "bilibili-api" "bilibili_api"
+check_and_install "bilibili-api-python" "bilibili_api"
 echo -e "${GREEN}[OK] 依赖检查完成${NC}"
 echo ""
 
