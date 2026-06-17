@@ -98,12 +98,28 @@ class WebPanelFrontendContractTest(unittest.TestCase):
         self.assertIn('id="agentSettingsGrid"', html)
         self.assertIn("renderAgentSettings", html)
 
+    def test_agent_page_has_prompt_skill_upload_controls(self):
+        html = self.html
+
+        self.assertIn('id="promptSkillScope"', html)
+        self.assertIn('id="promptSkillPersona"', html)
+        self.assertIn('id="promptSkillName"', html)
+        self.assertIn('id="promptSkillFile"', html)
+        self.assertIn('id="promptSkillContent"', html)
+        self.assertIn('id="promptSkillList"', html)
+        self.assertIn("loadPromptSkillFile", html)
+        self.assertIn("savePromptSkill", html)
+        self.assertIn("rf_prompt_skills", html)
+        self.assertIn("deletePromptSkill", html)
+        self.assertIn("/api/prompt-skills", html)
+
     def test_agent_skill_endpoint_persists_selected_skill(self):
         source = Path("web_panel.py").read_text(encoding="utf-8")
 
         self.assertIn("skill = (body.get('skill') or 'full_plan').strip()", source)
         self.assertIn("skill=skill", source)
         self.assertIn("Agent技能已排队: {skill}", source)
+        self.assertIn("prompt_skills=prompt_skills", source)
 
     def test_agent_manual_mode_starts_project_skill_runner(self):
         import web_panel
@@ -112,9 +128,12 @@ class WebPanelFrontendContractTest(unittest.TestCase):
         data_dir = Path(tempfile.mkdtemp(prefix="bili-web-agent-test-"))
         config_file = data_dir / "config.json"
         try:
-            with patch.object(web_panel, "_start_agent_skill_thread") as start_thread, \
-                    patch.object(web_panel, "DATA_DIR", data_dir), \
-                    patch.object(web_panel, "CONFIG_FILE", config_file):
+            with (
+                patch.object(web_panel, "_start_agent_skill_thread") as start_thread,
+                patch.object(web_panel, "_select_prompt_skills", return_value=[{"name": "全局学习风格", "scope": "global", "content": "慢一点讲。"}]),
+                patch.object(web_panel, "DATA_DIR", data_dir),
+                patch.object(web_panel, "CONFIG_FILE", config_file),
+            ):
                 web_panel.write_json(config_file, {"web": {"username": "alice", "password": "secret"}})
                 with web_panel.app.test_client() as client:
                     with client.session_transaction() as session:
@@ -138,6 +157,7 @@ class WebPanelFrontendContractTest(unittest.TestCase):
             "学习 Python 入门",
             "search_bilibili_videos",
             "默认人格",
+            [{"name": "全局学习风格", "scope": "global", "content": "慢一点讲。"}],
         )
 
     def test_agent_runner_does_not_enter_terminal_login_without_cookie(self):
@@ -155,6 +175,41 @@ class WebPanelFrontendContractTest(unittest.TestCase):
             self.assertTrue(any("请先在 B站登录页完成登录" in str(call.args[0]) for call in log_line.call_args_list))
         finally:
             shutil.rmtree(missing_cookie.parent, ignore_errors=True)
+
+    def test_prompt_skill_api_supports_global_and_persona_uploads(self):
+        import web_panel
+
+        data_dir = Path(tempfile.mkdtemp(prefix="bili-prompt-skill-test-"))
+        config_file = data_dir / "config.json"
+        try:
+            with patch.object(web_panel, "DATA_DIR", data_dir), patch.object(web_panel, "CONFIG_FILE", config_file):
+                web_panel.app.config.update(TESTING=True)
+                web_panel.write_json(config_file, {"web": {"username": "alice", "password": "secret"}})
+                with web_panel.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["disclaimer_agreed"] = True
+                        session["panel_authenticated"] = True
+                    global_response = client.post("/api/prompt-skills", json={
+                        "name": "全局学习风格",
+                        "scope": "global",
+                        "content": "# 全局学习风格\n用苏格拉底式追问。",
+                    })
+                    persona_response = client.post("/api/prompt-skills", json={
+                        "name": "学习搭子补丁",
+                        "scope": "persona",
+                        "persona": "学习搭子",
+                        "content": "# 学习搭子补丁\n口吻更温和。",
+                    })
+                    list_response = client.get("/api/prompt-skills?persona=学习搭子")
+
+            self.assertEqual(global_response.status_code, 200)
+            self.assertEqual(persona_response.status_code, 200)
+            payload = list_response.get_json()
+            self.assertEqual([item["name"] for item in payload["items"]], ["全局学习风格", "学习搭子补丁"])
+            self.assertEqual(payload["items"][0]["scope"], "global")
+            self.assertEqual(payload["items"][1]["persona"], "学习搭子")
+        finally:
+            shutil.rmtree(data_dir, ignore_errors=True)
 
     def test_main_ui_does_not_use_emoji_as_icons(self):
         html = self.html

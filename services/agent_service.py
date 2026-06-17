@@ -49,29 +49,48 @@ class AgentSkillRunner:
         skill = (skill or self.SKILL_FULL_PLAN).strip()
         return skill if skill in allowed else self.SKILL_FULL_PLAN
 
-    async def plan_and_execute(self, goal: str, skill: str = SKILL_FULL_PLAN):
+    def _normalize_prompt_skills(self, prompt_skills=None) -> list:
+        normalized = []
+        for item in prompt_skills or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            content = str(item.get("content") or "").strip()
+            if not name or not content:
+                continue
+            normalized.append({
+                "name": name[:80],
+                "scope": str(item.get("scope") or "global").strip() or "global",
+                "persona": str(item.get("persona") or "").strip(),
+                "content": content[:12000],
+            })
+        return normalized[:12]
+
+    async def plan_and_execute(self, goal: str, skill: str = SKILL_FULL_PLAN, prompt_skills=None):
         """规划并执行一个目标（内部用，返回 raw dict）"""
         skill = self._normalize_skill(skill)
+        prompt_skills = self._normalize_prompt_skills(prompt_skills)
         log(f"🤖 Agent开始规划: {goal} | skill={skill}", "INFO")
         plan = self._make_plan(goal, skill=skill)
         if not plan:
-            return {"status": "no_plan", "goal": goal, "skill": skill}
+            return {"status": "no_plan", "goal": goal, "skill": skill, "prompt_skills": prompt_skills}
         log(f"📋 Agent计划: {json.dumps(plan, ensure_ascii=False)[:200]}", "CONFIG")
         result = await self._execute_plan(plan)
         self.goal_log.append({
-            "goal": goal, "skill": skill, "plan": plan, "result": result,
+            "goal": goal, "skill": skill, "prompt_skills": prompt_skills, "plan": plan, "result": result,
             "created_at": datetime.now().isoformat(),
             "time": datetime.now().isoformat(),
         })
         self._save_goal_log()
         return result
 
-    async def run_goal(self, goal: str, skill: str = SKILL_FULL_PLAN):
+    async def run_goal(self, goal: str, skill: str = SKILL_FULL_PLAN, prompt_skills=None):
         """[兼容接口] 执行一个Agent目标，返回 callers 期望的 {goal, results: [{step, result}, ...]} 格式"""
         skill = self._normalize_skill(skill)
+        prompt_skills = self._normalize_prompt_skills(prompt_skills)
         plan = self._make_plan(goal, skill=skill)
         if not plan:
-            return {"goal": goal, "skill": skill, "results": [], "status": "no_plan"}
+            return {"goal": goal, "skill": skill, "prompt_skills": prompt_skills, "results": [], "status": "no_plan"}
 
         log(f"📋 Agent计划: {json.dumps(plan, ensure_ascii=False)[:200]}", "CONFIG")
 
@@ -87,7 +106,7 @@ class AgentSkillRunner:
             if action == "search":
                 query = step.get("query", goal)
                 count = step.get("result_count", AGENT_MAX_SEARCH_RESULTS)
-                step_info = {"skill": "search_bilibili_videos", "query": query, "count": count}
+                step_info = {"skill": "search_bilibili_videos", "query": query, "count": count, "prompt_skill_count": len(prompt_skills)}
                 raw = await self._search_videos(query, count)
                 if isinstance(raw, list):
                     self._search_results = raw  # 缓存供 watch 步骤使用
@@ -97,7 +116,7 @@ class AgentSkillRunner:
 
             elif action == "watch":
                 max_v = step.get("max_videos", AGENT_MAX_VIDEOS_PER_PLAN)
-                step_info = {"skill": "watch_bilibili_videos", "max_videos": max_v}
+                step_info = {"skill": "watch_bilibili_videos", "max_videos": max_v, "prompt_skill_count": len(prompt_skills)}
                 raw = await self._watch_videos(max_v)
                 if raw.get("error"):
                     step_result = {"ok": False, "error": raw["error"], "watched": raw.get("videos", [])}
@@ -105,12 +124,12 @@ class AgentSkillRunner:
                     step_result = {"ok": True, "watched": raw.get("videos", []), "count": raw.get("watched", 0)}
 
             elif action == "summarize":
-                step_info = {"skill": "write_memory"}
+                step_info = {"skill": "write_memory", "prompt_skill_count": len(prompt_skills)}
                 raw = self._summarize()
                 step_result = {"ok": True, "summary": raw.get("summary", "")}
 
             else:
-                step_info = {"skill": action}
+                step_info = {"skill": action, "prompt_skill_count": len(prompt_skills)}
                 step_result = {"ok": False, "error": f"未知动作: {action}"}
 
             results_list.append({"step": step_info, "result": step_result})
@@ -119,6 +138,7 @@ class AgentSkillRunner:
         self.goal_log.append({
             "goal": goal,
             "skill": skill,
+            "prompt_skills": prompt_skills,
             "plan": plan,
             "results": results_list,
             "created_at": datetime.now().isoformat(),
@@ -126,7 +146,7 @@ class AgentSkillRunner:
         })
         self._save_goal_log()
 
-        return {"goal": goal, "skill": skill, "results": results_list, "status": "completed"}
+        return {"goal": goal, "skill": skill, "prompt_skills": prompt_skills, "results": results_list, "status": "completed"}
 
     def _make_plan(self, goal: str, skill: str = SKILL_FULL_PLAN) -> list:
         cfg = _global_config.get("agent", {})

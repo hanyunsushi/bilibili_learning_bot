@@ -66,6 +66,7 @@ CONFIG_FILE = DATA_DIR / "config.json"
 COOKIE_FILE = DATA_DIR / "bilibili_cookies.json"
 # 账号标识名（显示在网页标题等处）
 ACCOUNT_NAME = os.getenv('BILI_ACCOUNT_NAME', '').strip() or '默认'
+PROMPT_SKILLS_FILENAME = "web_prompt_skills.json"
 
 app = Flask(__name__, static_folder=None)
 app.secret_key = os.urandom(24).hex()
@@ -100,6 +101,71 @@ def read_json(path: Path, default=None):
 def write_json(path: Path, data):
     """线程安全写入 JSON（原子写临时文件再 rename）。"""
     return JsonStore(path).write(data)
+
+def _prompt_skills_file() -> Path:
+    return DATA_DIR / PROMPT_SKILLS_FILENAME
+
+def _prompt_skill_record_id(scope: str, persona: str, name: str) -> str:
+    raw = f"{scope}\n{persona}\n{name}".encode("utf-8", errors="ignore")
+    return hashlib.sha1(raw).hexdigest()[:16]
+
+def _sanitize_prompt_skill_payload(body: dict, existing_id: str = "") -> dict:
+    """Normalize admin-provided prompt skill text for runtime-only storage."""
+    name = str(body.get("name") or "").strip()[:80]
+    scope = str(body.get("scope") or "global").strip().lower()
+    persona = str(body.get("persona") or "").strip()[:80]
+    content = str(body.get("content") or "").replace("\x00", "").strip()
+    if not name:
+        raise ValueError("Skill 名称不能为空")
+    if scope not in ("global", "persona"):
+        raise ValueError("Skill 作用域只能是 global 或 persona")
+    if scope == "persona" and not persona:
+        raise ValueError("人格 Skill 需要选择人格")
+    if scope == "global":
+        persona = ""
+    if not content:
+        raise ValueError("Skill 内容不能为空")
+    content = content[:20000]
+    skill_id = existing_id if re.match(r'^[a-f0-9]{16}$', existing_id) else _prompt_skill_record_id(scope, persona, name)
+    return dict(
+        id=skill_id,
+        name=name,
+        scope=scope,
+        persona=persona,
+        content=content,
+        updated_at=datetime.now().isoformat(),
+    )
+
+def _read_prompt_skills() -> list:
+    data = read_json(_prompt_skills_file(), dict(items=[]))
+    if isinstance(data, list):
+        raw_items = data
+    else:
+        raw_items = data.get("items", []) if isinstance(data, dict) else []
+    items = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            existing_id = str(item.get("id") or "").strip()
+            normalized = _sanitize_prompt_skill_payload(item, existing_id=existing_id)
+            normalized["created_at"] = item.get("created_at") or item.get("updated_at") or normalized["updated_at"]
+            normalized["updated_at"] = item.get("updated_at") or normalized["updated_at"]
+            items.append(normalized)
+        except Exception:
+            continue
+    return items
+
+def _write_prompt_skills(items: list):
+    write_json(_prompt_skills_file(), dict(items=items))
+
+def _select_prompt_skills(persona: str = "") -> list:
+    persona = str(persona or "").strip()
+    selected = []
+    for item in _read_prompt_skills():
+        if item.get("scope") == "global" or (persona and item.get("scope") == "persona" and item.get("persona") == persona):
+            selected.append(item)
+    return selected[:12]
 
 def panel_credentials(config=None):
     """Return configured Web panel username/password, with env password taking precedence."""
@@ -536,6 +602,9 @@ a{color:var(--accent)}
 .setting-card{background:var(--white);border:1px solid var(--sand);border-radius:14px;padding:13px 14px}
 .setting-card strong{display:block;color:var(--fg);font-size:13px;margin-bottom:4px}
 .setting-card span{font-size:11px;color:var(--muted);line-height:1.45}
+.prompt-skill-list{display:grid;gap:10px;margin-top:12px}
+.prompt-skill-card{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:start}
+.prompt-skill-card pre{margin:8px 0 0;color:var(--muted);font-family:var(--font-mono);font-size:11px;line-height:1.48;white-space:pre-wrap;word-break:break-word}
 .agent-shell{display:grid;grid-template-columns:minmax(260px,360px) 1fr;gap:16px;align-items:start}
 .persona-item{background:var(--white);border:1px solid var(--sand);border-radius:14px;padding:14px;margin-bottom:10px}
 .persona-item.active{border-color:var(--fg);box-shadow:0 0 0 1px var(--fg)}
@@ -844,6 +913,17 @@ a{color:var(--accent)}
 <div class="notice" id="agentSkillHelp"></div>
 <div class="fg"><label>目标描述</label><textarea id="agentGoal" placeholder="例如：搜索深度学习入门并总结前 3 个视频"></textarea></div>
 <div class="btn-grp"><button class="btn btn-pr" onclick="runAgent()">执行 Agent</button><button class="btn btn-out" onclick="rf_psna()">刷新设置</button></div>
+</div>
+<div class="pc"><h3>上传 Prompt Skill</h3>
+<div class="form-grid">
+<div class="fg"><label>作用域</label><select id="promptSkillScope" onchange="renderPromptSkillScope()"><option value="persona">当前人格</option><option value="global">全局</option></select></div>
+<div class="fg"><label>绑定人格</label><select id="promptSkillPersona" onchange="rf_prompt_skills()"></select></div>
+</div>
+<div class="fg"><label>Skill 名称</label><input id="promptSkillName" placeholder="如：苏格拉底式学习陪练"></div>
+<div class="fg"><label>本地文件</label><input id="promptSkillFile" type="file" accept=".md,.txt,text/markdown,text/plain" onchange="loadPromptSkillFile(this)"><div class="field-note">支持 .md / .txt，本地读取后保存为项目内 Prompt Skill。</div></div>
+<div class="fg"><label>Skill 内容</label><textarea id="promptSkillContent" placeholder="写入这段 skill 希望人格遵循的行为、口吻、步骤或边界。"></textarea></div>
+<div class="btn-grp"><button class="btn btn-pr" onclick="savePromptSkill()">保存 Skill</button><button class="btn btn-out" onclick="rf_prompt_skills()">刷新列表</button></div>
+<div class="prompt-skill-list" id="promptSkillList"></div>
 </div>
 <div class="pc"><h3>Agent 可选设置</h3><div class="settings-grid" id="agentSettingsGrid"></div></div>
 <div class="pc"><h3>当前人格详情</h3><div id="activePersonaDetail"></div></div>
@@ -1465,6 +1545,67 @@ if(!sel||!box)return;
 var item=agentSkillCatalog[sel.value]||agentSkillCatalog.full_plan;
 box.innerHTML='<strong>'+esc(item.label)+'</strong> · '+esc(item.hint)+'<br>这里调用的是项目内 AgentSkillRunner 技能，不是 Codex 宿主的本地 SKILL.md。';
 }
+function renderPromptSkillScope(){
+var scope=document.getElementById('promptSkillScope'),persona=document.getElementById('promptSkillPersona');
+if(!scope||!persona)return;
+persona.disabled=scope.value==='global';
+rf_prompt_skills();
+}
+function setPromptSkillPersonas(optionsHtml){
+var box=document.getElementById('promptSkillPersona');
+if(box)box.innerHTML=optionsHtml;
+}
+function loadPromptSkillFile(input){
+var file=input&&input.files&&input.files[0];
+if(!file)return;
+if(file.size>20000){toast('Skill 文件不能超过 20KB','err');input.value='';return}
+var reader=new FileReader();
+reader.onload=function(){
+var name=document.getElementById('promptSkillName'),content=document.getElementById('promptSkillContent');
+if(name&&!name.value.trim())name.value=file.name.replace(/\.(md|txt)$/i,'');
+if(content)content.value=String(reader.result||'');
+};
+reader.onerror=function(){toast('读取 Skill 文件失败','err')};
+reader.readAsText(file,'utf-8');
+}
+function renderPromptSkills(items){
+var box=document.getElementById('promptSkillList');
+if(!box)return;
+if(!items||!items.length){box.innerHTML=emptyState('agent','暂无 Prompt Skill');return}
+var h='';
+for(var i=0;i<items.length;i++){
+var it=items[i],scope=it.scope==='global'?'全局':'人格',meta=scope+(it.persona?' · '+it.persona:'');
+var preview=String(it.content||'').slice(0,220);
+h+='<div class="setting-card prompt-skill-card"><div><strong>'+esc(it.name||'-')+'</strong><span>'+esc(meta)+' · '+esc((it.updated_at||'').slice(0,16))+'</span><pre>'+esc(preview)+'</pre></div><button class="btn btn-sm btn-out" onclick="deletePromptSkill(\''+esc(it.id||'')+'\')">删除</button></div>';
+}
+box.innerHTML=h;
+}
+async function rf_prompt_skills(){
+try{
+var scope=document.getElementById('promptSkillScope'),persona=document.getElementById('promptSkillPersona');
+var query='';
+if(scope&&scope.value==='persona'&&persona&&persona.value)query='?persona='+encodeURIComponent(persona.value);
+var r=await api('GET','/api/prompt-skills'+query);
+renderPromptSkills(r.items||[]);
+}catch(e){}
+}
+async function savePromptSkill(){
+var scope=document.getElementById('promptSkillScope').value;
+var persona=document.getElementById('promptSkillPersona').value;
+var name=document.getElementById('promptSkillName').value.trim();
+var content=document.getElementById('promptSkillContent').value.trim();
+if(!name){toast('请输入 Skill 名称','err');return}
+if(!content){toast('请输入或上传 Skill 内容','err');return}
+var r=await api('POST','/api/prompt-skills',{name:name,scope:scope,persona:persona,content:content});
+toast(r.message,r.ok?'ok':'err');
+if(r.ok){document.getElementById('promptSkillFile').value='';rf_prompt_skills()}
+}
+async function deletePromptSkill(id){
+if(!id||!confirm('删除这个 Prompt Skill？'))return;
+var r=await api('DELETE','/api/prompt-skills/'+encodeURIComponent(id));
+toast(r.message,r.ok?'ok':'err');
+if(r.ok)rf_prompt_skills();
+}
 
 // ── PERSONA ──
 async function rf_psna(){
@@ -1477,11 +1618,13 @@ sel+='<option value="'+esc(n)+'" '+(isA?'selected':'')+'>'+esc(n)+'</option>';
 }
 document.getElementById('psnaList').innerHTML=h||'<div class="emp">暂无人设</div>';
 var ps=document.getElementById('agentPersonaSelect');if(ps)ps.innerHTML=sel;
+setPromptSkillPersonas(sel);
 var active=items[act]||{};
 document.getElementById('activePersonaDetail').innerHTML='<div class="setting-card"><strong>'+esc(act||'-')+'</strong><span>'+esc(active.system_prompt||'未设置系统 Prompt')+'</span></div><div class="setting-card" style="margin-top:10px"><strong>表达风格</strong><span>'+esc(active.style||'-')+'</span></div><div class="setting-card" style="margin-top:10px"><strong>行为边界</strong><span>'+esc((active.rules||[]).join(' / ')||'-')+'</span></div>';
 if(!Object.keys(_configCache||{}).length){try{_configCache=await api('GET','/api/config')}catch(e){}}
 renderAgentSettings(_configCache);
 renderAgentSkillHelp();
+renderPromptSkillScope();
 }catch(e){}
 }
 async function addPsna(){
@@ -2126,6 +2269,42 @@ def api_personas_delete(name):
         return jsonify(dict(ok=True, message=f'已删除"{name}"'))
     return jsonify(dict(ok=False, message='不存在')), 404
 
+@app.route('/api/prompt-skills', methods=['GET', 'POST'])
+def api_prompt_skills():
+    if request.method == 'GET':
+        persona = (request.args.get('persona') or '').strip()
+        items = _select_prompt_skills(persona) if persona else _read_prompt_skills()
+        return jsonify(dict(items=items))
+    try:
+        body = request.get_json(force=True)
+        incoming = _sanitize_prompt_skill_payload(body)
+        items = _read_prompt_skills()
+        incoming["created_at"] = incoming["updated_at"]
+        replaced = False
+        for index, item in enumerate(items):
+            if item.get("id") == incoming["id"]:
+                incoming["created_at"] = item.get("created_at") or incoming["created_at"]
+                items[index] = incoming
+                replaced = True
+                break
+        if not replaced:
+            items.append(incoming)
+        _write_prompt_skills(items)
+        return jsonify(dict(ok=True, message='Prompt Skill 已保存', item=incoming))
+    except ValueError as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 500
+
+@app.route('/api/prompt-skills/<skill_id>', methods=['DELETE'])
+def api_prompt_skill_delete(skill_id):
+    items = _read_prompt_skills()
+    kept = [item for item in items if item.get("id") != skill_id]
+    if len(kept) == len(items):
+        return jsonify(dict(ok=False, message='Prompt Skill 不存在')), 404
+    _write_prompt_skills(kept)
+    return jsonify(dict(ok=True, message='Prompt Skill 已删除'))
+
 # ── 评论日志 ──
 @app.route('/api/comments')
 def api_comments():
@@ -2306,7 +2485,7 @@ def api_export():
         for fname in ['config.json', 'bilibili_cookies.json', 'mood_state.json', 'personas.json',
                        'user_profiles.json', 'comment_log.json', 'bot_diary.json',
                        'self_evolution.json', 'agent_skill_log.json', 'bot_runtime_state.json',
-                       'history_videos.json', 'interests.json']:
+                       'history_videos.json', 'interests.json', PROMPT_SKILLS_FILENAME]:
             fp = DATA_DIR / fname
             if fp.exists():
                 try:
@@ -2407,7 +2586,7 @@ def api_factory_reset():
         for fname in ['config.json', 'bilibili_cookies.json', 'mood_state.json', 'personas.json',
                        'user_profiles.json', 'comment_log.json', 'bot_diary.json',
                        'self_evolution.json', 'agent_skill_log.json', 'bot_runtime_state.json',
-                       'history_videos.json', 'interests.json', 'web_personas.json']:
+                       'history_videos.json', 'interests.json', 'web_personas.json', PROMPT_SKILLS_FILENAME]:
             fp = DATA_DIR / fname
             if fp.exists():
                 fp.unlink()
@@ -2521,13 +2700,14 @@ def api_action_send_danmaku():
     except Exception as e:
         return jsonify(dict(ok=False, message=str(e))), 400
 
-def _run_agent_skill(goal: str, skill: str, persona: str = ""):
+def _run_agent_skill(goal: str, skill: str, persona: str = "", prompt_skills=None):
     if not COOKIE_FILE.exists():
         log_line("Agent技能未启动: 请先在 B站登录页完成登录")
         return
 
     async def _run():
-        log_line(f"Agent技能开始执行: {skill} -> {goal}")
+        selected_prompt_skills = prompt_skills if prompt_skills is not None else _select_prompt_skills(persona)
+        log_line(f"Agent技能开始执行: {skill} -> {goal} (Prompt Skills: {len(selected_prompt_skills)})")
         try:
             import new_agent
             brain = new_agent.AgentBrain()
@@ -2539,7 +2719,7 @@ def _run_agent_skill(goal: str, skill: str, persona: str = ""):
             if runner is None:
                 from services.agent_service import AgentSkillRunner
                 runner = AgentSkillRunner(brain=brain)
-            result = await runner.run_goal(goal, skill=skill)
+            result = await runner.run_goal(goal, skill=skill, prompt_skills=selected_prompt_skills)
             results = result.get("results", [])
             ok_steps = sum(1 for item in results if item.get("result", {}).get("ok"))
             log_line(f"Agent技能执行完成: {skill} -> {goal} ({ok_steps}/{len(results)} 步成功)")
@@ -2553,10 +2733,10 @@ def _run_agent_skill(goal: str, skill: str, persona: str = ""):
     finally:
         loop.close()
 
-def _start_agent_skill_thread(goal: str, skill: str, persona: str = ""):
+def _start_agent_skill_thread(goal: str, skill: str, persona: str = "", prompt_skills=None):
     thread = threading.Thread(
         target=_run_agent_skill,
-        args=(goal, skill, persona),
+        args=(goal, skill, persona, prompt_skills),
         name="web-agent-skill",
         daemon=True,
     )
@@ -2574,16 +2754,17 @@ def api_action_agent_skill():
         mode = (body.get('mode') or 'queue').strip()
         if not goal:
             return jsonify(dict(ok=False, message='请输入目标描述')), 400
+        prompt_skills = _select_prompt_skills(persona)
         if mode in ('manual', 'dive'):
-            _start_agent_skill_thread(goal, skill, persona)
-            log_line(f"Agent技能已启动: {mode}/{skill} -> {goal}")
-            return jsonify(dict(ok=True, message=f'Agent任务已启动: {skill} / {goal}'))
+            _start_agent_skill_thread(goal, skill, persona, prompt_skills)
+            log_line(f"Agent技能已启动: {mode}/{skill} -> {goal} (Prompt Skills: {len(prompt_skills)})")
+            return jsonify(dict(ok=True, message=f'Agent任务已启动: {skill} / {goal}', prompt_skill_count=len(prompt_skills)))
         task_file = DATA_DIR / "web_action_queue.json"
         tasks = read_json(task_file, [])
-        tasks.append(dict(type='agent_skill', goal=goal, persona=persona, skill=skill, mode=mode, time=datetime.now().isoformat()))
+        tasks.append(dict(type='agent_skill', goal=goal, persona=persona, skill=skill, mode=mode, prompt_skills=prompt_skills, time=datetime.now().isoformat()))
         write_json(task_file, tasks)
-        log_line(f"Agent技能已排队: {skill} -> {goal}")
-        return jsonify(dict(ok=True, message=f'Agent任务已加入队列: {skill} / {goal}'))
+        log_line(f"Agent技能已排队: {skill} -> {goal} (Prompt Skills: {len(prompt_skills)})")
+        return jsonify(dict(ok=True, message=f'Agent任务已加入队列: {skill} / {goal}', prompt_skill_count=len(prompt_skills)))
     except Exception as e:
         return jsonify(dict(ok=False, message=str(e))), 400
 
