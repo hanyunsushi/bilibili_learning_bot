@@ -1,0 +1,19 @@
+bilibili-api-python==16.0.0
+openai==0.28.0
+httpx[http2]
+colorama
+qrcode
+Pillow
+flask
+flask-cors
+requests
+
+# Optional: ASR 语音识别
+# funasr
+# torch
+# torchaudio
+# whisper
+
+# Optional: 向量检索
+# sentence-transformers
+# numpy
