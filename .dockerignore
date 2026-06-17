@@ -10,6 +10,9 @@ __pycache__/
 *.pyd
 .venv/
 venv/
+.env
+.env.*
+!.env.example
 
 # 本地运行时数据（挂载卷方式注入）
 Data/

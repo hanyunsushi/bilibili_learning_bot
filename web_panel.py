@@ -99,6 +99,14 @@ def write_json(path: Path, data):
     """线程安全写入 JSON（原子写临时文件再 rename）。"""
     return JsonStore(path).write(data)
 
+def panel_credentials(config=None):
+    """Return configured Web panel username/password, with env password taking precedence."""
+    config = config if config is not None else read_json(CONFIG_FILE, {})
+    web_cfg = config.get('web', {})
+    username = (web_cfg.get('username') or '').strip()
+    password = os.getenv('BILI_LEARNING_PANEL_PASSWORD') or web_cfg.get('password', '')
+    return username, password
+
 def file_stat(path: Path):
     if not path.exists(): return {"exists": False, "size": 0, "mtime": None, "size_fmt": "0 B"}
     s = path.stat()
@@ -2562,9 +2570,7 @@ def api_auth_login():
     username = (data.get('username') or '').strip()
     password = data.get('password', '')
     config = read_json(CONFIG_FILE, {})
-    web_cfg = config.get('web', {})
-    saved_user = web_cfg.get('username', '')
-    saved_pass = web_cfg.get('password', '')
+    saved_user, saved_pass = panel_credentials(config)
     if not saved_user or not saved_pass:
         return jsonify(dict(ok=False, message='面板尚未设置，请先完成首次配置'))
     if username == saved_user and password == saved_pass:
@@ -2602,8 +2608,8 @@ def _check_auth():
 
     # 2. 检查面板是否已配置（首次使用）
     config = read_json(CONFIG_FILE, {})
-    web_cfg = config.get('web', {})
-    has_credentials = bool(web_cfg.get('username')) and bool(web_cfg.get('password'))
+    saved_user, saved_pass = panel_credentials(config)
+    has_credentials = bool(saved_user) and bool(saved_pass)
     if not has_credentials:
         allowed = ('setup_page', 'api_auth_setup', 'api_auth_logout', 'static')
         if request.endpoint in allowed:

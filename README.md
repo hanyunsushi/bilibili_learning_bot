@@ -91,6 +91,24 @@ cp config.example.json Data/config.json
 # 编辑 Data/config.json 填入你的 API Key（统一API或OpenAI兼容接口）
 ```
 
+Docker 部署推荐使用本地 `.env` 保存私密配置：
+
+```bash
+cp .env.example .env
+# 编辑 .env，至少填写 BILI_AI_API_KEY
+# B站登录建议进入 Web 面板后使用扫码登录完成
+```
+
+关键配置项：
+
+| 配置 | 说明 |
+|------|------|
+| `BILI_AI_API_KEY` 或 `Data/config.json -> api.unified_api_key` | OpenAI 兼容 API Key |
+| `BILI_AI_BASE_URL` 或 `Data/config.json -> api.unified_base_url` | OpenAI 兼容接口地址，默认 `https://api.openai.com/v1` |
+| `BILI_AI_MODEL_BRAIN` / `BILI_AI_MODEL_VISION` | 文本和视觉模型 |
+| `BILI_REFRESH_TOKEN` 或 Web 扫码登录 | B站登录凭据，推荐扫码生成 |
+| `BILI_LEARNING_PANEL_PASSWORD` 或 Web 首次设置 | Web 面板密码 |
+
 ### 3️⃣ 启动
 
 **交互式菜单**:
@@ -104,12 +122,20 @@ python3 web_panel.py
 # 访问 http://localhost:7860
 ```
 
+**Docker Compose**:
+```bash
+docker compose up -d --build
+# 当前 compose 默认映射到 http://127.0.0.1:8090
+```
+
 **Termux 一键启动**:
 ```bash
 bash start.sh
 ```
 
 ### 4️⃣ 首次使用
+
+Web 面板首次访问会先进入免责声明页，按页面提示输入 `我同意` 后继续。
 
 1. 进入菜单后按 `3` 配置B站登录（扫码或Cookie）
 2. 按 `1` 启动机器人自动刷视频

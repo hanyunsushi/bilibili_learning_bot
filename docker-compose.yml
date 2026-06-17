@@ -13,7 +13,17 @@ services:
       - WEB_PORT=8080
       - WEB_HOST=0.0.0.0
       - BILI_DISCLAIMER_SKIP=1
-      # AI API 配置（推荐用环境变量，更安全）
-      # - BILI_AI_API_KEY=sk-你的APIKey
-      # - BILI_AI_BASE_URL=https://api.openai.com/v1
-      # - BILI_BOT_NAME=你的机器人名字
+      - BILI_ACCOUNT_NAME=${BILI_ACCOUNT_NAME:-默认}
+      - BILI_AI_API_KEY=${BILI_AI_API_KEY:-}
+      - BILI_AI_BASE_URL=${BILI_AI_BASE_URL:-https://api.openai.com/v1}
+      - BILI_AI_MODEL_BRAIN=${BILI_AI_MODEL_BRAIN:-gpt-4.1-mini}
+      - BILI_AI_MODEL_VISION=${BILI_AI_MODEL_VISION:-gpt-4.1-mini}
+      - BILI_AI_MODEL_CHAT=${BILI_AI_MODEL_CHAT:-gpt-4.1-mini}
+      - BILI_AI_MODEL_FAST=${BILI_AI_MODEL_FAST:-gpt-4.1-nano}
+      - BILI_AI_MODEL_IMAGE=${BILI_AI_MODEL_IMAGE:-gpt-image-1}
+      - BILI_AI_MODEL_EMBEDDING=${BILI_AI_MODEL_EMBEDDING:-text-embedding-3-small}
+      - BILI_AI_FALLBACK_API_KEY=${BILI_AI_FALLBACK_API_KEY:-}
+      - BILI_AI_FALLBACK_BASE_URL=${BILI_AI_FALLBACK_BASE_URL:-}
+      - BILI_REFRESH_TOKEN=${BILI_REFRESH_TOKEN:-}
+      - BILI_LEARNING_PANEL_PASSWORD=${BILI_LEARNING_PANEL_PASSWORD:-}
+      - BILI_AI_MARKER=${BILI_AI_MARKER:-（内容由AI生成并由AI回复）}
