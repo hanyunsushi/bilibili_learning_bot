@@ -210,6 +210,13 @@ DEFAULT_CONFIG = {
         "vision_api_key": "",
         "vision_base_url": ""
     },
+    "providers": {
+        "chat": {"api_key": "", "base_url": "", "model": ""},
+        "vision": {"api_key": "", "base_url": "", "model": ""},
+        "image": {"api_key": "", "base_url": "", "model": ""},
+        "fast": {"api_key": "", "base_url": "", "model": ""},
+        "embedding": {"api_key": "", "base_url": "", "model": ""}
+    },
     "interaction": {
         "coin_threshold": 8.0,
         "fav_threshold": 8.5,
@@ -434,8 +441,8 @@ def get_bot_name():
 
 
 def get_config_or_env(section, key, env_name):
-    """优先使用环境变量，避免把 API Key 等敏感信息写入本地配置。"""
-    return os.getenv(env_name) or config.get(section, {}).get(key, "")
+    """配置文件显式值优先，环境变量作为 Docker/部署兜底。"""
+    return config.get(section, {}).get(key, "") or os.getenv(env_name, "")
 
 
 def mask_secret(value):
@@ -455,15 +462,56 @@ def configure_openai_client():
 
 
 def is_api_configured():
-    return bool(UNIFIED_API_KEY and UNIFIED_BASE_URL and MODEL_BRAIN)
+    provider = provider_for_role("chat")
+    return bool(provider["api_key"] and provider["base_url"] and provider["model"])
+
+
+def _provider_env_value(role, suffix):
+    return os.getenv(f"BILI_AI_{role.upper()}_{suffix}", "").strip()
+
+
+def _model_for_role(role):
+    if role == "vision":
+        return MODEL_VISION or MODEL_BRAIN
+    if role == "fast":
+        return config.get("models", {}).get("fast") or MODEL_BRAIN
+    return config.get("models", {}).get(role) or MODEL_BRAIN
+
+
+def provider_for_role(role):
+    role = role if role in ("chat", "vision", "image", "fast", "embedding") else "chat"
+    providers = config.get("providers", {})
+    provider = providers.get(role, {}) if isinstance(providers, dict) else {}
+    api_provider = config.get("api", {})
+    legacy_key = api_provider.get("vision_api_key", "") if role == "vision" else ""
+    legacy_url = api_provider.get("vision_base_url", "") if role == "vision" else ""
+    return {
+        "api_key": (
+            provider.get("api_key", "")
+            or _provider_env_value(role, "API_KEY")
+            or legacy_key
+            or UNIFIED_API_KEY
+        ),
+        "base_url": (
+            provider.get("base_url", "")
+            or _provider_env_value(role, "BASE_URL")
+            or legacy_url
+            or UNIFIED_BASE_URL
+        ),
+        "model": (
+            provider.get("model", "")
+            or _provider_env_value(role, "MODEL")
+            or _model_for_role(role)
+        ),
+    }
 
 def get_vision_api_key():
     """获取视觉模型 API Key（独立配置优先，否则回退统一配置）"""
-    return config["api"].get("vision_api_key") or UNIFIED_API_KEY
+    return provider_for_role("vision")["api_key"]
 
 def get_vision_base_url():
     """获取视觉模型 API URL（独立配置优先，否则回退统一配置）"""
-    return config["api"].get("vision_base_url") or UNIFIED_BASE_URL
+    return provider_for_role("vision")["base_url"]
 
 
 # 提取配置变量
@@ -471,6 +519,7 @@ UNIFIED_API_KEY = get_config_or_env("api", "unified_api_key", "BILI_AI_API_KEY")
 UNIFIED_BASE_URL = get_config_or_env("api", "unified_base_url", "BILI_AI_BASE_URL")
 MODEL_BRAIN = get_config_or_env("api", "model_brain", "BILI_AI_MODEL_BRAIN")
 MODEL_VISION = get_config_or_env("api", "model_vision", "BILI_AI_MODEL_VISION")
+PROVIDERS = config.get("providers", {})
 
 # 🔑 视觉模型独立 API 配置（未设置时回退到统一配置）
 VISION_API_KEY = config["api"].get("vision_api_key") or UNIFIED_API_KEY
@@ -5043,7 +5092,7 @@ def import_config():
 def _reload_all_globals(new_config: dict):
     """重置后尝试更新运行时全局变量。由于变量名与模块级定义可能不同，
     部分变量通过 config 引用，真正生效需要重启。这里做 best-effort 更新。"""
-    global UNIFIED_API_KEY, UNIFIED_BASE_URL, MODEL_BRAIN, MODEL_VISION
+    global UNIFIED_API_KEY, UNIFIED_BASE_URL, MODEL_BRAIN, MODEL_VISION, PROVIDERS
     global VISION_API_KEY, VISION_BASE_URL
     global COIN_THRESHOLD, FAV_THRESHOLD, INTEREST_THRESHOLD, MAX_COINS_DAILY, MAX_ENERGY
     global PROB_REPLY_TRIGGER, PROB_COIN, PROB_FAV, PROB_LIKE_SOLO, PROB_COMMENT_OTHERS
@@ -5111,6 +5160,7 @@ def _reload_all_globals(new_config: dict):
     UNIFIED_BASE_URL = api.get("unified_base_url", "")
     MODEL_BRAIN = api.get("model_brain", "")
     MODEL_VISION = api.get("model_vision", "")
+    PROVIDERS = new_config.get("providers", {})
     VISION_API_KEY = api.get("vision_api_key", "") or UNIFIED_API_KEY
     VISION_BASE_URL = api.get("vision_base_url", "") or UNIFIED_BASE_URL
 
@@ -7962,7 +8012,24 @@ class AgentBrain:
         # 兼容新版 openai：request_timeout → timeout
         if "request_timeout" in kwargs:
             kwargs["timeout"] = kwargs.pop("request_timeout")
-        return openai.ChatCompletion.create(**kwargs)
+        api_key = kwargs.pop("_override_api_key", None) or kwargs.pop("_vision_api_key", None)
+        base_url = kwargs.pop("_override_base_url", None) or kwargs.pop("_vision_base_url", None)
+        kwargs.pop("_model_role", None)
+        old_api_key = getattr(openai, "api_key", None)
+        old_api_base = getattr(openai, "api_base", None)
+        old_base_url = getattr(openai, "base_url", None)
+        try:
+            if api_key:
+                openai.api_key = api_key
+            if base_url:
+                url = base_url.rstrip("/")
+                openai.api_base = url
+                openai.base_url = url
+            return openai.ChatCompletion.create(**kwargs)
+        finally:
+            openai.api_key = old_api_key
+            openai.api_base = old_api_base
+            openai.base_url = old_base_url
 
     async def _call_ai_via_httpx(self, **kwargs):
         """通过 httpx 直接 POST 到 OpenAI 兼容端点（备选方案）。
@@ -7985,6 +8052,7 @@ class AgentBrain:
         base_url = (kwargs.pop("_override_base_url", None) 
                     or kwargs.pop("_vision_base_url", None) 
                     or UNIFIED_BASE_URL)
+        kwargs.pop("_model_role", None)
 
         url = f"{base_url}/chat/completions"
         headers = {
@@ -8028,15 +8096,24 @@ class AgentBrain:
         if self._is_ai_degraded():
             raise RuntimeError("AI处于降级模式，跳过调用")
         
+        _requested_model = kwargs.get("model", MODEL_BRAIN)
+
+        _explicit_role = kwargs.pop("_model_role", "")
+
         # 🔑 检测视觉模型（含备用模型）
         _is_vision = (
-            kwargs.get("model") == MODEL_VISION
-            or kwargs.get("model") == FALLBACK_MODEL_VISION
-            or "vision" in str(kwargs.get("model", "")).lower()
+            _explicit_role == "vision"
+            or _requested_model == MODEL_VISION
+            or _requested_model == FALLBACK_MODEL_VISION
+            or "vision" in str(_requested_model).lower()
         )
+        _fast_model = config.get("models", {}).get("fast")
+        _is_fast = _explicit_role == "fast" or (_fast_model and _requested_model == _fast_model) or _requested_model == FALLBACK_MODEL_FAST
+        _role = "vision" if _is_vision else ("fast" if _is_fast else "chat")
+        _role_provider = provider_for_role(_role)
         
         # 🔑 构建模型尝试列表（主模型 + 备用模型）
-        _primary_model = kwargs.get("model", MODEL_BRAIN)
+        _primary_model = _role_provider.get("model") or _requested_model
         _fallback_model = FALLBACK_MODEL_VISION if _is_vision else FALLBACK_MODEL_CHAT
         _models_to_try = [_primary_model]
         if _fallback_model and _fallback_model != _primary_model:
@@ -8048,8 +8125,8 @@ class AgentBrain:
         # 🔑 构建provider尝试列表（主provider + 备用provider）
         _providers = [{
             "name": "primary",
-            "api_key": (VISION_API_KEY if _is_vision and VISION_API_KEY else UNIFIED_API_KEY),
-            "base_url": (VISION_BASE_URL if _is_vision and VISION_BASE_URL else UNIFIED_BASE_URL),
+            "api_key": _role_provider.get("api_key", ""),
+            "base_url": _role_provider.get("base_url", ""),
         }]
         
         # 备用provider（如chatanywhere）
@@ -8113,12 +8190,6 @@ class AgentBrain:
                     log(f"[REFRESH] 模型降级: {_prov_models[0]} → {model}", "WARN")
                 
                 kwargs["model"] = model
-                if _is_fallback_provider:
-                    kwargs["_override_api_key"] = _prov_api_key
-                    kwargs["_override_base_url"] = _prov_base_url
-                elif _is_vision:
-                    kwargs["_vision_api_key"] = _prov_api_key
-                    kwargs["_vision_base_url"] = _prov_base_url
                 
                 # [REFRESH] 备用模型(非主provider)用_fallback_retries次；主模型用_primary_retries
                 _cur_retries = _fallback_retries if (_is_fallback_provider or mi > 0) else _primary_retries
@@ -8126,11 +8197,14 @@ class AgentBrain:
                 for attempt in range(_cur_retries):
                     for bi, backend in enumerate(backends):
                         is_last_backend = (bi == len(backends) - 1)
+                        call_kwargs = dict(kwargs)
+                        call_kwargs["_override_api_key"] = _prov_api_key
+                        call_kwargs["_override_base_url"] = _prov_base_url
                         try:
                             if backend == "openai" and not _is_fallback_provider:
-                                resp = await self._call_ai_via_openai(**kwargs)
+                                resp = await self._call_ai_via_openai(**call_kwargs)
                             else:
-                                resp = await self._call_ai_via_httpx(**kwargs)
+                                resp = await self._call_ai_via_httpx(**call_kwargs)
                             
                             # [OK] 成功
                             self._ai_errors_consecutive = 0
@@ -8177,11 +8251,14 @@ class AgentBrain:
                     for attempt in range(1):  # 只试1次
                         for bi, backend in enumerate(backends):
                             is_last_backend = (bi == len(backends) - 1)
+                            call_kwargs = dict(kwargs)
+                            call_kwargs["_override_api_key"] = _prov_api_key
+                            call_kwargs["_override_base_url"] = _prov_base_url
                             try:
                                 if backend == "openai":
-                                    resp = await self._call_ai_via_openai(**kwargs)
+                                    resp = await self._call_ai_via_openai(**call_kwargs)
                                 else:
-                                    resp = await self._call_ai_via_httpx(**kwargs)
+                                    resp = await self._call_ai_via_httpx(**call_kwargs)
                                 self._ai_errors_consecutive = 0
                                 self._ai_primary_failing = 0
                                 if self._preferred_ai_method != backend:
@@ -16741,4 +16818,3 @@ B站等级: Lv.{target_level}
                 import traceback
                 traceback.print_exc()
                 await asyncio.sleep(3)
-

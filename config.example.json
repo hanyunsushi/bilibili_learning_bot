@@ -12,6 +12,34 @@
     "fast": "gpt-4.1-nano",
     "embedding": "text-embedding-3-small"
   },
+  "providers": {
+    "_comment": "按用途覆盖统一 API：留空则回退到 api.unified_* 和 models.*",
+    "chat": {
+      "api_key": "",
+      "base_url": "",
+      "model": "gpt-4.1-mini"
+    },
+    "vision": {
+      "api_key": "",
+      "base_url": "",
+      "model": "gpt-4.1-mini"
+    },
+    "image": {
+      "api_key": "",
+      "base_url": "",
+      "model": "gpt-image-1"
+    },
+    "fast": {
+      "api_key": "",
+      "base_url": "",
+      "model": "gpt-4.1-nano"
+    },
+    "embedding": {
+      "api_key": "",
+      "base_url": "",
+      "model": "text-embedding-3-small"
+    }
+  },
   "fallback_models": {
     "chat": "gpt-4.1-nano",
     "vision": "gpt-4.1-mini",

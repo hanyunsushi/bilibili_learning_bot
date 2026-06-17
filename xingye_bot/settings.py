@@ -31,6 +31,9 @@ DEFAULT_FALLBACK_MODELS = {
 }
 
 
+MODEL_ROLES = ("chat", "vision", "image", "fast", "embedding")
+
+
 MODEL_PRICES = {
     "gpt-4.1-mini": 0.0,
     "gpt-4.1-nano": 0.0,
@@ -39,12 +42,21 @@ MODEL_PRICES = {
 }
 
 
+def _public_provider(provider: dict[str, str]) -> dict[str, Any]:
+    return {
+        "configured": bool(provider.get("api_key") and provider.get("base_url") and provider.get("model")),
+        "base_url": provider.get("base_url", ""),
+        "model": provider.get("model", ""),
+    }
+
+
 @dataclass
 class BotSettings:
     api_key: str = ""
     base_url: str = "https://api.openai.com/v1"
     models: dict[str, str] = field(default_factory=lambda: DEFAULT_MODELS.copy())
     fallback_models: dict[str, str] = field(default_factory=lambda: DEFAULT_FALLBACK_MODELS.copy())
+    providers: dict[str, dict[str, str]] = field(default_factory=dict)
     panel_password: str = ""
     owner_mid: str = ""
     max_daily_actions: int = 20
@@ -78,7 +90,18 @@ class BotSettings:
 
     @property
     def configured(self) -> bool:
-        return bool(self.api_key and self.base_url and self.models.get("chat"))
+        provider = self.provider_for_role("chat")
+        return bool(provider["api_key"] and provider["base_url"] and provider["model"])
+
+    def provider_for_role(self, role: str) -> dict[str, str]:
+        role = role if role in MODEL_ROLES else "chat"
+        provider = _dict(self.providers.get(role))
+        model = str(provider.get("model") or self.models.get(role) or self.models.get("chat") or "").strip()
+        return {
+            "api_key": str(provider.get("api_key") or self.api_key or "").strip(),
+            "base_url": str(provider.get("base_url") or self.base_url or "").strip(),
+            "model": model,
+        }
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -163,6 +186,26 @@ def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _env(name: str) -> str:
+    return os.getenv(name, "").strip()
+
+
+def _role_provider_from_config(role: str, raw_providers: dict[str, Any], api_key: str, base_url: str, models: dict[str, str]) -> dict[str, str]:
+    provider = _dict(raw_providers.get(role))
+    role_prefix = f"BILI_AI_{role.upper()}_"
+    return {
+        "api_key": provider.get("api_key", "") or _env(role_prefix + "API_KEY") or "",
+        "base_url": provider.get("base_url", "") or _env(role_prefix + "BASE_URL") or "",
+        "model": (
+            provider.get("model", "")
+            or _env(role_prefix + "MODEL")
+            or _env(f"BILI_AI_MODEL_{role.upper()}")
+            or models.get(role, "")
+            or ""
+        ),
+    }
+
+
 def load_settings() -> BotSettings:
     DATA_DIR.mkdir(exist_ok=True)
     raw = read_runtime_config()
@@ -172,13 +215,14 @@ def load_settings() -> BotSettings:
     video = _dict(raw.get("video"))
     behavior = _dict(raw.get("behavior"))
 
+    raw_models = _dict(raw.get("models"))
     models = DEFAULT_MODELS.copy()
     if api.get("model_brain"):
         models["chat"] = api["model_brain"]
         models["fast"] = api["model_brain"]
     if api.get("model_vision"):
         models["vision"] = api["model_vision"]
-    models.update(_dict(raw.get("models")))
+    models.update(raw_models)
 
     fallback_models = DEFAULT_FALLBACK_MODELS.copy()
     if api.get("model_brain"):
@@ -192,16 +236,25 @@ def load_settings() -> BotSettings:
     if video_mode not in {"subtitle", "frames", "hybrid", "smart"}:
         video_mode = "smart"
 
+    model_overrides = {
+        "chat": models.get("chat") or _env("BILI_AI_MODEL_CHAT") or DEFAULT_MODELS["chat"],
+        "vision": models.get("vision") or _env("BILI_AI_MODEL_VISION") or DEFAULT_MODELS["vision"],
+        "image": models.get("image") or _env("BILI_AI_MODEL_IMAGE") or DEFAULT_MODELS["image"],
+        "fast": models.get("fast") or _env("BILI_AI_MODEL_FAST") or DEFAULT_MODELS["fast"],
+        "embedding": models.get("embedding") or _env("BILI_AI_MODEL_EMBEDDING") or DEFAULT_MODELS["embedding"],
+    }
+    api_key = api.get("unified_api_key", "") or _env("BILI_AI_API_KEY")
+    base_url = api.get("unified_base_url") or _env("BILI_AI_BASE_URL") or "https://api.openai.com/v1"
+    raw_providers = _dict(raw.get("providers"))
+    providers = {
+        role: _role_provider_from_config(role, raw_providers, api_key, base_url, model_overrides)
+        for role in MODEL_ROLES
+    }
+
     return BotSettings(
-        api_key=os.getenv("BILI_AI_API_KEY") or api.get("unified_api_key", ""),
-        base_url=os.getenv("BILI_AI_BASE_URL") or api.get("unified_base_url") or "https://api.openai.com/v1",
-        models={
-            "chat": os.getenv("BILI_AI_MODEL_CHAT") or models["chat"],
-            "vision": os.getenv("BILI_AI_MODEL_VISION") or models["vision"],
-            "image": os.getenv("BILI_AI_MODEL_IMAGE") or models["image"],
-            "fast": os.getenv("BILI_AI_MODEL_FAST") or models["fast"],
-            "embedding": os.getenv("BILI_AI_MODEL_EMBEDDING") or models.get("embedding", DEFAULT_MODELS["embedding"]),
-        },
+        api_key=api_key,
+        base_url=base_url,
+        models=model_overrides,
         fallback_models={
             "chat": os.getenv("BILI_AI_MODEL_CHAT_FALLBACK") or fallback_models["chat"],
             "vision": os.getenv("BILI_AI_MODEL_VISION_FALLBACK") or fallback_models["vision"],
@@ -209,6 +262,7 @@ def load_settings() -> BotSettings:
             "fast": os.getenv("BILI_AI_MODEL_FAST_FALLBACK") or fallback_models["fast"],
             "embedding": os.getenv("BILI_AI_MODEL_EMBEDDING_FALLBACK") or fallback_models.get("embedding", DEFAULT_FALLBACK_MODELS["embedding"]),
         },
+        providers=providers,
         panel_password=os.getenv("BILI_LEARNING_PANEL_PASSWORD") or web.get("password", ""),
         owner_mid=str(_dict(raw.get("bilibili")).get("owner_mid", "")),
         max_daily_actions=_int(automation.get("max_daily_actions"), 20, 0, 1000),
@@ -248,6 +302,7 @@ def public_config(settings: BotSettings) -> dict[str, Any]:
         "configured": settings.configured,
         "models": settings.models,
         "fallback_models": settings.fallback_models,
+        "providers": {role: _public_provider(settings.provider_for_role(role)) for role in MODEL_ROLES},
         "auth_required": bool(settings.panel_password),
         "owner_mid": settings.owner_mid,
         "dry_run": settings.dry_run,

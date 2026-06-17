@@ -91,6 +91,30 @@ class WebPanelFrontendContractTest(unittest.TestCase):
         self.assertIn('data-cfg-path="fallback_models.image"', html)
         self.assertIn('data-cfg-path="fallback_models.embedding"', html)
 
+    def test_config_page_exposes_per_role_provider_settings(self):
+        html = self.html
+
+        self.assertIn("按用途拆分供应商", html)
+        for role in ("chat", "vision", "image", "embedding", "fast"):
+            self.assertIn(f'data-cfg-path="providers.{role}.api_key"', html)
+            self.assertIn(f'data-cfg-path="providers.{role}.base_url"', html)
+            self.assertIn(f'data-cfg-path="providers.{role}.model"', html)
+
+    def test_focus_ring_uses_terracotta_not_blue(self):
+        html = self.html
+
+        self.assertIn("--focus:#c96442", html)
+        self.assertIn("rgba(201,100,66,.18)", html)
+        self.assertNotIn("#3898ec", html)
+        self.assertNotIn("rgba(56,152,236", html)
+
+    def test_system_buttons_have_spacing_from_descriptive_text(self):
+        html = self.html
+
+        self.assertIn(".sys-actions{margin-top:14px", html)
+        self.assertIn('<div class="sys-actions"><button class="btn btn-pr" onclick="exportConfig()">导出全部配置</button></div>', html)
+        self.assertIn('<div class="sys-actions"><button class="btn btn-out" onclick="listBackups()">刷新备份列表</button></div>', html)
+
     def test_standalone_pages_share_site_logo_and_ios_icons(self):
         source = Path("web_panel.py").read_text(encoding="utf-8")
 

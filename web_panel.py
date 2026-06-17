@@ -524,7 +524,7 @@ _DEFAULT_HTML = r'''<!DOCTYPE html>
 --sand:#e8e6dc;--line:#f0eee6;--ring-color:#d1cfc5;--border:var(--line);
 --bg2:var(--surface);--bg3:var(--white);
 --accent:#c96442;--accent2:#d97757;
---green:#64735b;--orange:#b9822f;--red:#b53333;--pink:#a85f78;--purple:#7563a8;--blue:#52708f;--focus:#3898ec;
+--green:#64735b;--orange:#b9822f;--red:#b53333;--pink:#a85f78;--purple:#7563a8;--blue:#52708f;--focus:#c96442;
 --font-serif:Georgia,"Times New Roman","Songti SC",serif;
 --font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
 --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
@@ -603,7 +603,7 @@ a{color:var(--accent)}
 .btn{appearance:none;-webkit-appearance:none;display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:36px;padding:7px 14px;border-radius:var(--rs);font-size:12px;font-weight:650;cursor:pointer;border:1px solid transparent;transition:background-color .16s ease,color .16s ease,border-color .16s ease,box-shadow .16s ease,transform .16s ease;white-space:nowrap}
 .btn:hover{box-shadow:0 0 0 1px var(--ring-color)}
 .btn:active{transform:translateY(1px)}
-.btn:focus-visible{outline:none;box-shadow:0 0 0 3px rgba(56,152,236,.16),0 0 0 1px var(--focus)}
+.btn:focus-visible{outline:none;box-shadow:0 0 0 3px rgba(201,100,66,.18),0 0 0 1px var(--focus)}
 .btn-pr{background:var(--accent);color:var(--surface);border-color:rgba(201,100,66,.12)}
 .btn-pr:hover{background:#b95a3b}
 .btn-suc{background:var(--green);color:#fff}
@@ -619,7 +619,7 @@ a{color:var(--accent)}
 .fg{margin-bottom:12px}
 .fg label{display:block;font-size:11px;font-weight:650;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em}
 .fg input,.fg textarea,.fg select{width:100%;padding:9px 11px;background:var(--white);border:1px solid var(--sand);border-radius:var(--rs);color:var(--fg);font-size:12px;font-family:inherit;outline:none;transition:border-color .16s ease,box-shadow .16s ease,background-color .16s ease}
-.fg input:focus,.fg textarea:focus,.fg select:focus{border-color:var(--focus);box-shadow:0 0 0 3px rgba(56,152,236,.14)}
+.fg input:focus,.fg textarea:focus,.fg select:focus{border-color:var(--focus);box-shadow:0 0 0 3px rgba(201,100,66,.18)}
 .fg textarea{resize:vertical;min-height:70px;font-family:var(--font-mono);font-size:11px}
 .fr{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 @media(max-width:600px){.fr{grid-template-columns:1fr}}
@@ -635,6 +635,9 @@ a{color:var(--accent)}
 .logo-preview{width:120px;height:120px;border-radius:26px;background:var(--fg);color:var(--surface);display:flex;align-items:center;justify-content:center;font-size:36px;font-weight:750;overflow:hidden;box-shadow:var(--shadow-card);border:1px solid rgba(20,20,19,.08)}
 .logo-preview svg,.logo-preview img{width:100%;height:100%;display:block}
 .logo-preview img{object-fit:cover}
+.provider-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:12px}
+.provider-card{background:var(--white);border:1px solid var(--sand);border-radius:14px;padding:13px 14px}
+.provider-card h4{font-family:var(--font-sans);font-size:13px;color:var(--fg);margin-bottom:8px}
 .settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
 .setting-card{background:var(--white);border:1px solid var(--sand);border-radius:14px;padding:13px 14px}
 .setting-card strong{display:block;color:var(--fg);font-size:13px;margin-bottom:4px}
@@ -642,6 +645,7 @@ a{color:var(--accent)}
 .prompt-skill-list{display:grid;gap:10px;margin-top:12px}
 .prompt-skill-card{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:start}
 .prompt-skill-card pre{margin:8px 0 0;color:var(--muted);font-family:var(--font-mono);font-size:11px;line-height:1.48;white-space:pre-wrap;word-break:break-word}
+.sys-actions{margin-top:14px;display:flex;gap:8px;flex-wrap:wrap}
 .agent-shell{display:grid;grid-template-columns:minmax(260px,360px) 1fr;gap:16px;align-items:start}
 .persona-item{background:var(--white);border:1px solid var(--sand);border-radius:14px;padding:14px;margin-bottom:10px}
 .persona-item.active{border-color:var(--fg);box-shadow:0 0 0 1px var(--fg)}
@@ -667,7 +671,7 @@ a{color:var(--accent)}
 
 /* JSON EDITOR */
 .je{width:100%;min-height:380px;background:var(--white);border:1px solid var(--sand);border-radius:var(--rs);color:var(--fg);font-family:var(--font-mono);font-size:12px;padding:13px;resize:vertical;outline:none;line-height:1.58}
-.je:focus{border-color:var(--focus);box-shadow:0 0 0 3px rgba(56,152,236,.14)}
+.je:focus{border-color:var(--focus);box-shadow:0 0 0 3px rgba(201,100,66,.18)}
 
 /* QR */
 .qr-wrap{text-align:center;padding:20px}
@@ -831,12 +835,20 @@ a{color:var(--accent)}
 </div>
 
 <div class="config-panel" id="cfg-api">
-<div class="field-note" style="margin-bottom:12px">一个 API Key / Base URL 可以同时服务多个用途，不是只能用官方 OpenAI；也可以填任何提供 OpenAI 兼容 chat/completions、embeddings、images/generations 接口的服务商。不同用途在“模型”页填写对应模型名。</div>
+<div class="field-note" style="margin-bottom:12px">统一 API 是默认供应商，不是要求你用一家供应商包办所有能力；可以填任何提供 OpenAI 兼容接口的服务商。下面“按用途拆分供应商”留空时自动回退到统一 API。</div>
 <div class="form-grid">
 <div class="fg"><label>API Key</label><input id="apiKeyInput" data-cfg-path="api.unified_api_key" type="password" autocomplete="off" placeholder="sk-..."></div>
 <div class="fg"><label>Base URL</label><input data-cfg-path="api.unified_base_url" placeholder="https://api.openai.com/v1"></div>
 <div class="fg"><label>主脑模型</label><input data-cfg-path="api.model_brain" placeholder="gpt-4.1-mini"></div>
 <div class="fg"><label>视觉模型</label><input data-cfg-path="api.model_vision" placeholder="gpt-4.1-mini"></div>
+</div>
+<div class="field-note" style="margin:12px 0 8px"><strong style="color:var(--fg)">按用途拆分供应商</strong>：Chat / Vision / Image / Embedding / Fast 可以分别接不同供应商。某项只填模型或完全留空时，Key 和 Base URL 仍沿用统一 API。</div>
+<div class="provider-grid">
+<div class="provider-card"><h4>Chat 文本对话</h4><div class="fg"><label>API Key</label><input data-cfg-path="providers.chat.api_key" type="password" autocomplete="off"></div><div class="fg"><label>Base URL</label><input data-cfg-path="providers.chat.base_url" placeholder="https://api.openai.com/v1"></div><div class="fg"><label>模型</label><input data-cfg-path="providers.chat.model" placeholder="gpt-4.1-mini"></div></div>
+<div class="provider-card"><h4>Vision 图片/视频理解</h4><div class="fg"><label>API Key</label><input data-cfg-path="providers.vision.api_key" type="password" autocomplete="off"></div><div class="fg"><label>Base URL</label><input data-cfg-path="providers.vision.base_url" placeholder="https://api.openai.com/v1"></div><div class="fg"><label>模型</label><input data-cfg-path="providers.vision.model" placeholder="gpt-4.1-mini"></div></div>
+<div class="provider-card"><h4>Image 图片生成</h4><div class="fg"><label>API Key</label><input data-cfg-path="providers.image.api_key" type="password" autocomplete="off"></div><div class="fg"><label>Base URL</label><input data-cfg-path="providers.image.base_url" placeholder="https://api.openai.com/v1"></div><div class="fg"><label>模型</label><input data-cfg-path="providers.image.model" placeholder="gpt-image-1"></div></div>
+<div class="provider-card"><h4>Embedding 向量</h4><div class="fg"><label>API Key</label><input data-cfg-path="providers.embedding.api_key" type="password" autocomplete="off"></div><div class="fg"><label>Base URL</label><input data-cfg-path="providers.embedding.base_url" placeholder="https://api.openai.com/v1"></div><div class="fg"><label>模型</label><input data-cfg-path="providers.embedding.model" placeholder="text-embedding-3-small"></div></div>
+<div class="provider-card"><h4>Fast 快速任务</h4><div class="fg"><label>API Key</label><input data-cfg-path="providers.fast.api_key" type="password" autocomplete="off"></div><div class="fg"><label>Base URL</label><input data-cfg-path="providers.fast.base_url" placeholder="https://api.openai.com/v1"></div><div class="fg"><label>模型</label><input data-cfg-path="providers.fast.model" placeholder="gpt-4.1-nano"></div></div>
 </div>
 <div class="fr">
 <label class="toggle-sw"><input type="checkbox" data-cfg-path="fallback_provider.enabled"><span class="toggle-track"></span><span style="margin-left:10px;font-size:13px">启用备用 Provider</span></label>
@@ -849,7 +861,7 @@ a{color:var(--accent)}
 </div>
 
 <div class="config-panel" id="cfg-models">
-<div class="field-note" style="margin-bottom:12px">这里不是让一个模型处理所有类型，而是在同一个 OpenAI 兼容 Provider 下，按用途分配模型：Chat 负责文本回复，Vision 负责视频抽帧/图片理解，Image 调用图片生成接口，Embedding 调用向量接口，Fast 用于低成本快速任务。</div>
+<div class="field-note" style="margin-bottom:12px">一个 API Key / Base URL 可以同时服务多个用途，但不是必须这样用；这里定义默认模型名。若在“大模型 API”页给某个用途单独配置供应商，该用途会优先使用自己的 Provider 和模型。</div>
 <div class="form-grid">
 <div class="fg"><label>Chat</label><input data-cfg-path="models.chat"></div>
 <div class="fg"><label>Vision</label><input data-cfg-path="models.vision"></div>
@@ -1173,11 +1185,11 @@ a{color:var(--accent)}
 <div class="page" id="pg-sys">
 <div class="ph"><h1>系统管理</h1><p>备份 · 恢复 · 重置</p></div>
 <div class="pc"><h3>导出配置</h3><p style="font-size:11px;color:var(--text2)">一键导出全部配置到 C:\bilibili_claw_backup</p>
-<button class="btn btn-pr" onclick="exportConfig()">导出全部配置</button>
+<div class="sys-actions"><button class="btn btn-pr" onclick="exportConfig()">导出全部配置</button></div>
 <div id="exportMsg" style="margin-top:8px;font-size:12px"></div>
 </div>
 <div class="pc"><h3>导入配置</h3><p style="font-size:11px;color:var(--text2)">从备份文件恢复</p>
-<button class="btn btn-out" onclick="listBackups()">刷新备份列表</button>
+<div class="sys-actions"><button class="btn btn-out" onclick="listBackups()">刷新备份列表</button></div>
 <div id="backupList" style="margin:10px 0;font-size:12px"></div>
 </div>
 <div class="pc danger-card">
@@ -3109,7 +3121,7 @@ def _disclaimer_html():
 {{SITE_HEAD_TAGS}}
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-:root{--bg:#f5f4ed;--surface:#faf9f5;--white:#fff;--fg:#141413;--text:#4d4c48;--text2:#5e5d59;--muted:#5e5d59;--sand:#e8e6dc;--line:#f0eee6;--ring:#d1cfc5;--accent:#c96442;--red:#b53333;--green:#64735b;--focus:#3898ec;--font-serif:Georgia,"Times New Roman","Songti SC",serif;--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;--shadow:rgba(20,20,19,.08) 0 18px 52px}
+:root{--bg:#f5f4ed;--surface:#faf9f5;--white:#fff;--fg:#141413;--text:#4d4c48;--text2:#5e5d59;--muted:#5e5d59;--sand:#e8e6dc;--line:#f0eee6;--ring:#d1cfc5;--accent:#c96442;--red:#b53333;--green:#64735b;--focus:#c96442;--font-serif:Georgia,"Times New Roman","Songti SC",serif;--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;--shadow:rgba(20,20,19,.08) 0 18px 52px}
 body{font-family:var(--font-sans);background:radial-gradient(circle at 80% 12%,rgba(201,100,66,.08),transparent 28%),var(--bg);color:var(--fg);display:flex;align-items:center;justify-content:center;min-height:100vh;line-height:1.55;padding:20px}
 .card{background:rgba(250,249,245,.96);backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:18px;padding:34px 30px;max-width:520px;width:min(520px,100%);text-align:center;box-shadow:var(--shadow)}
 .auth-logo{width:52px;height:52px;margin:0 auto 16px;border-radius:15px;background:var(--fg);color:var(--surface);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:20px;overflow:hidden;box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
@@ -3121,7 +3133,7 @@ body{font-family:var(--font-sans);background:radial-gradient(circle at 80% 12%,r
 .card .lines .en{font-size:12px;color:var(--muted);margin-top:8px;display:block}
 .inp-row{display:flex;gap:10px;align-items:stretch}
 .inp-row input{flex:1;background:var(--white);border:1px solid var(--sand);border-radius:12px;padding:11px 14px;color:var(--fg);font-size:16px;outline:none;transition:border-color .16s ease,box-shadow .16s ease}
-.inp-row input:focus{border-color:var(--focus);box-shadow:0 0 0 3px rgba(56,152,236,.14)}
+.inp-row input:focus{border-color:var(--focus);box-shadow:0 0 0 3px rgba(201,100,66,.18)}
 .inp-row input.error{border-color:var(--red);animation:shake .35s}
 .btn{background:var(--accent);color:#fff;border:none;border-radius:12px;padding:10px 20px;font-size:15px;cursor:pointer;transition:transform .16s ease,opacity .16s ease;min-width:92px}
 .btn:hover{opacity:.92}
@@ -3181,7 +3193,7 @@ def _setup_html():
 {{SITE_HEAD_TAGS}}
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-:root{--bg:#f5f4ed;--surface:#faf9f5;--white:#fff;--fg:#141413;--text:#4d4c48;--text2:#5e5d59;--muted:#5e5d59;--sand:#e8e6dc;--line:#f0eee6;--ring:#d1cfc5;--accent:#c96442;--red:#b53333;--green:#64735b;--focus:#3898ec;--font-serif:Georgia,"Times New Roman","Songti SC",serif;--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;--shadow:rgba(20,20,19,.08) 0 18px 52px}
+:root{--bg:#f5f4ed;--surface:#faf9f5;--white:#fff;--fg:#141413;--text:#4d4c48;--text2:#5e5d59;--muted:#5e5d59;--sand:#e8e6dc;--line:#f0eee6;--ring:#d1cfc5;--accent:#c96442;--red:#b53333;--green:#64735b;--focus:#c96442;--font-serif:Georgia,"Times New Roman","Songti SC",serif;--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;--shadow:rgba(20,20,19,.08) 0 18px 52px}
 body{font-family:var(--font-sans);background:radial-gradient(circle at 80% 12%,rgba(201,100,66,.08),transparent 28%),var(--bg);color:var(--fg);display:flex;align-items:center;justify-content:center;min-height:100vh;line-height:1.55;padding:20px}
 .card{background:rgba(250,249,245,.96);backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:18px;padding:34px 30px;max-width:440px;width:min(440px,100%);text-align:center;box-shadow:var(--shadow)}
 .auth-logo{width:52px;height:52px;margin:0 auto 16px;border-radius:15px;background:var(--fg);color:var(--surface);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:20px;overflow:hidden;box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
@@ -3192,7 +3204,7 @@ body{font-family:var(--font-sans);background:radial-gradient(circle at 80% 12%,r
 .fg{margin-bottom:14px;text-align:left}
 .fg label{display:block;font-size:12px;font-weight:650;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em}
 .fg input{width:100%;background:var(--white);border:1px solid var(--sand);border-radius:12px;padding:10px 14px;color:var(--fg);font-size:15px;outline:none;transition:border-color .16s ease,box-shadow .16s ease}
-.fg input:focus{border-color:var(--focus);box-shadow:0 0 0 3px rgba(56,152,236,.14)}
+.fg input:focus{border-color:var(--focus);box-shadow:0 0 0 3px rgba(201,100,66,.18)}
 .fg input.error{border-color:var(--red);animation:shake .35s}
 .hint{font-size:11px;color:var(--muted);margin-top:4px}
 .btn{background:var(--accent);color:#fff;border:none;border-radius:12px;padding:10px 24px;font-size:15px;cursor:pointer;transition:opacity .16s ease,transform .16s ease;width:100%;margin-top:6px}
@@ -3249,7 +3261,7 @@ def _login_html():
 {{SITE_HEAD_TAGS}}
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-:root{--bg:#f5f4ed;--surface:#faf9f5;--white:#fff;--fg:#141413;--text:#4d4c48;--text2:#5e5d59;--muted:#5e5d59;--sand:#e8e6dc;--line:#f0eee6;--ring:#d1cfc5;--accent:#c96442;--red:#b53333;--green:#64735b;--focus:#3898ec;--font-serif:Georgia,"Times New Roman","Songti SC",serif;--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;--shadow:rgba(20,20,19,.08) 0 18px 52px}
+:root{--bg:#f5f4ed;--surface:#faf9f5;--white:#fff;--fg:#141413;--text:#4d4c48;--text2:#5e5d59;--muted:#5e5d59;--sand:#e8e6dc;--line:#f0eee6;--ring:#d1cfc5;--accent:#c96442;--red:#b53333;--green:#64735b;--focus:#c96442;--font-serif:Georgia,"Times New Roman","Songti SC",serif;--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;--shadow:rgba(20,20,19,.08) 0 18px 52px}
 body{font-family:var(--font-sans);background:radial-gradient(circle at 80% 12%,rgba(201,100,66,.08),transparent 28%),var(--bg);color:var(--fg);display:flex;align-items:center;justify-content:center;min-height:100vh;line-height:1.55;padding:20px}
 .card{background:rgba(250,249,245,.96);backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:18px;padding:34px 30px;max-width:400px;width:min(400px,100%);text-align:center;box-shadow:var(--shadow)}
 .auth-logo{width:52px;height:52px;margin:0 auto 16px;border-radius:15px;background:var(--fg);color:var(--surface);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:20px;overflow:hidden;box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
@@ -3260,7 +3272,7 @@ body{font-family:var(--font-sans);background:radial-gradient(circle at 80% 12%,r
 .fg{margin-bottom:14px;text-align:left}
 .fg label{display:block;font-size:12px;font-weight:650;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em}
 .fg input{width:100%;background:var(--white);border:1px solid var(--sand);border-radius:12px;padding:10px 14px;color:var(--fg);font-size:15px;outline:none;transition:border-color .16s ease,box-shadow .16s ease}
-.fg input:focus{border-color:var(--focus);box-shadow:0 0 0 3px rgba(56,152,236,.14)}
+.fg input:focus{border-color:var(--focus);box-shadow:0 0 0 3px rgba(201,100,66,.18)}
 .fg input.error{border-color:var(--red);animation:shake .35s}
 .btn{background:var(--accent);color:#fff;border:none;border-radius:12px;padding:10px 24px;font-size:15px;cursor:pointer;transition:opacity .16s ease,transform .16s ease;width:100%;margin-top:6px}
 .btn:hover{opacity:.92}
