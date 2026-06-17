@@ -3337,14 +3337,14 @@ def show_diary_evolution_menu():
             print(f"{Fore.RED}[ERROR] 无效选项！{Style.RESET_ALL}")
 
 
-async def run_manual_agent_goal(goal):
+async def run_manual_agent_goal(goal, skill="full_plan"):
     brain = AgentBrain()
     login_success = await brain.initialize_login()
     if not login_success:
         print(f"{Fore.RED}[ERROR] 登录失败，无法运行需要B站上下文的Agent技能{Style.RESET_ALL}")
         return
     runner = AgentSkillRunner(brain=brain)
-    run = await runner.run_goal(goal)
+    run = await runner.run_goal(goal, skill=skill)
     print(f"{Fore.GREEN}[OK] Agent执行完成{Style.RESET_ALL}")
     print(f"目标: {run.get('goal')}")
     for idx, item in enumerate(run.get("results", []), 1):
@@ -3403,7 +3403,8 @@ def show_agent_skill_menu():
             goal = input(f'{Fore.YELLOW}输入Agent目标，例如「了解gpt-5.2这个新模型，看5个相关视频」: {Style.RESET_ALL}').strip()
             if goal:
                 try:
-                    asyncio.run(run_manual_agent_goal(goal))
+                    skill = input(f"{Fore.YELLOW}调用技能(full_plan/search_bilibili_videos/watch_bilibili_videos/write_memory，回车默认full_plan): {Style.RESET_ALL}").strip() or "full_plan"
+                    asyncio.run(run_manual_agent_goal(goal, skill=skill))
                 except Exception as e:
                     print(f"{Fore.RED}[ERROR] Agent运行失败: {e}{Style.RESET_ALL}")
         elif choice == "2":
@@ -16740,5 +16741,4 @@ B站等级: Lv.{target_level}
                 import traceback
                 traceback.print_exc()
                 await asyncio.sleep(3)
-
 

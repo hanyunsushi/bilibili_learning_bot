@@ -12,6 +12,11 @@ from core.config import (
 class AgentSkillRunner:
     """主动 Agent 技能执行器：规划、搜索视频、看视频、沉淀记忆。"""
 
+    SKILL_FULL_PLAN = "full_plan"
+    SKILL_SEARCH = "search_bilibili_videos"
+    SKILL_WATCH = "watch_bilibili_videos"
+    SKILL_MEMORY = "write_memory"
+
     def __init__(self, brain=None, credential=None, uid=0):
         self.brain = brain
         self.credential = credential or getattr(brain, "credential", None)
@@ -34,27 +39,39 @@ class AgentSkillRunner:
         except Exception as e:
             log(f"保存Agent技能日志失败: {e}", "WARN")
 
-    async def plan_and_execute(self, goal: str):
+    def _normalize_skill(self, skill: str = "") -> str:
+        allowed = {
+            self.SKILL_FULL_PLAN,
+            self.SKILL_SEARCH,
+            self.SKILL_WATCH,
+            self.SKILL_MEMORY,
+        }
+        skill = (skill or self.SKILL_FULL_PLAN).strip()
+        return skill if skill in allowed else self.SKILL_FULL_PLAN
+
+    async def plan_and_execute(self, goal: str, skill: str = SKILL_FULL_PLAN):
         """规划并执行一个目标（内部用，返回 raw dict）"""
-        log(f"🤖 Agent开始规划: {goal}", "INFO")
-        plan = await self._make_plan(goal)
+        skill = self._normalize_skill(skill)
+        log(f"🤖 Agent开始规划: {goal} | skill={skill}", "INFO")
+        plan = self._make_plan(goal, skill=skill)
         if not plan:
-            return {"status": "no_plan", "goal": goal}
+            return {"status": "no_plan", "goal": goal, "skill": skill}
         log(f"📋 Agent计划: {json.dumps(plan, ensure_ascii=False)[:200]}", "CONFIG")
         result = await self._execute_plan(plan)
         self.goal_log.append({
-            "goal": goal, "plan": plan, "result": result,
+            "goal": goal, "skill": skill, "plan": plan, "result": result,
             "created_at": datetime.now().isoformat(),
             "time": datetime.now().isoformat(),
         })
         self._save_goal_log()
         return result
 
-    async def run_goal(self, goal: str):
+    async def run_goal(self, goal: str, skill: str = SKILL_FULL_PLAN):
         """[兼容接口] 执行一个Agent目标，返回 callers 期望的 {goal, results: [{step, result}, ...]} 格式"""
-        plan = await self._make_plan(goal)
+        skill = self._normalize_skill(skill)
+        plan = self._make_plan(goal, skill=skill)
         if not plan:
-            return {"goal": goal, "results": [], "status": "no_plan"}
+            return {"goal": goal, "skill": skill, "results": [], "status": "no_plan"}
 
         log(f"📋 Agent计划: {json.dumps(plan, ensure_ascii=False)[:200]}", "CONFIG")
 
@@ -101,6 +118,7 @@ class AgentSkillRunner:
         # 写入日志
         self.goal_log.append({
             "goal": goal,
+            "skill": skill,
             "plan": plan,
             "results": results_list,
             "created_at": datetime.now().isoformat(),
@@ -108,15 +126,23 @@ class AgentSkillRunner:
         })
         self._save_goal_log()
 
-        return {"goal": goal, "results": results_list, "status": "completed"}
+        return {"goal": goal, "skill": skill, "results": results_list, "status": "completed"}
 
-    async def _make_plan(self, goal: str) -> list:
+    def _make_plan(self, goal: str, skill: str = SKILL_FULL_PLAN) -> list:
         cfg = _global_config.get("agent", {})
         max_steps = cfg.get("max_steps_per_plan", AGENT_MAX_STEPS_PER_PLAN)
-        plan = []
-        plan.append({"action": "search", "query": goal, "result_count": cfg.get("max_search_results", AGENT_MAX_SEARCH_RESULTS)})
-        plan.append({"action": "watch", "max_videos": cfg.get("max_videos_per_plan", AGENT_MAX_VIDEOS_PER_PLAN)})
-        plan.append({"action": "summarize"})
+        skill = self._normalize_skill(skill)
+        search_step = {"action": "search", "query": goal, "result_count": cfg.get("max_search_results", AGENT_MAX_SEARCH_RESULTS)}
+        watch_step = {"action": "watch", "max_videos": cfg.get("max_videos_per_plan", AGENT_MAX_VIDEOS_PER_PLAN)}
+        memory_step = {"action": "summarize"}
+        if skill == self.SKILL_SEARCH:
+            plan = [search_step]
+        elif skill == self.SKILL_WATCH:
+            plan = [search_step, watch_step]
+        elif skill == self.SKILL_MEMORY:
+            plan = [memory_step]
+        else:
+            plan = [search_step, watch_step, memory_step]
         return plan[:max_steps]
 
     async def _execute_plan(self, plan: list) -> dict:

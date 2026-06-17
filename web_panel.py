@@ -719,7 +719,7 @@ a{color:var(--accent)}
 <div class="fg"><label>品牌名称</label><input id="siteBrandInput" data-cfg-path="site.brand_name" placeholder="B站 AI 管理系统"></div>
 <div class="fg"><label>文字 Logo</label><input id="siteLogoText" data-cfg-path="site.logo_text" maxlength="8" placeholder="BL" oninput="previewSiteLogo()"></div>
 </div>
-<div class="fg"><label>自定义 SVG Logo</label><textarea id="siteLogoSvg" data-cfg-path="site.logo_svg" placeholder="<svg ...>...</svg>" oninput="previewSiteLogo()"></textarea><div class="field-note">留空时使用黑底白字自动生成图标；填写 SVG 时会作为全站图标源。</div></div>
+<div class="fg"><label>自定义 SVG Logo</label><textarea id="siteLogoSvg" data-cfg-path="site.logo_svg" placeholder="<svg ...>...</svg>" oninput="previewSiteLogo()"></textarea><div class="btn-grp"><input id="siteLogoFile" type="file" accept=".svg,image/svg+xml" style="display:none" onchange="loadLogoSvgFile(this)"><button class="btn btn-out" onclick="document.getElementById('siteLogoFile').click()">上传 SVG</button><button class="btn btn-out" onclick="clearLogoSvg()">清空 SVG</button></div><div class="field-note">留空时使用黑底白字自动生成图标；上传或填写 SVG 时会作为全站图标源。</div></div>
 </div>
 </div>
 </div>
@@ -838,8 +838,10 @@ a{color:var(--accent)}
 <div class="pc"><h3>手动 Agent 任务</h3>
 <div class="form-grid">
 <div class="fg"><label>使用人格</label><select id="agentPersonaSelect"></select></div>
-<div class="fg"><label>执行模式</label><select id="agentMode"><option value="queue">加入任务队列</option><option value="manual">手动目标</option><option value="dive">深度搜索</option></select></div>
+<div class="fg"><label>调用 Skill</label><select id="agentSkillSelect" onchange="renderAgentSkillHelp()"><option value="full_plan">完整计划</option><option value="search_bilibili_videos">搜索 B 站视频</option><option value="watch_bilibili_videos">理解/观看视频</option><option value="write_memory">写入本轮记忆</option></select></div>
+<div class="fg"><label>执行模式</label><select id="agentMode"><option value="manual" selected>立即后台执行</option><option value="queue">仅加入任务队列</option><option value="dive">深度搜索</option></select></div>
 </div>
+<div class="notice" id="agentSkillHelp"></div>
 <div class="fg"><label>目标描述</label><textarea id="agentGoal" placeholder="例如：搜索深度学习入门并总结前 3 个视频"></textarea></div>
 <div class="btn-grp"><button class="btn btn-pr" onclick="runAgent()">执行 Agent</button><button class="btn btn-out" onclick="rf_psna()">刷新设置</button></div>
 </div>
@@ -1289,13 +1291,35 @@ var r=await api('POST','/api/bili/logout');toast(r.message,r.ok?'ok':'err');chec
 
 // ── CONFIG ──
 var _configCache={};
-function rf_conf(){loadConf()}
+var _configLoaded=false;
+var _configDirty=false;
+function configAutoRefreshBlocked(){if(_configDirty)return true;return false}
+function rf_conf(){
+if(configAutoRefreshBlocked()){
+var msg=document.getElementById('confMsg');if(msg)msg.textContent='配置有未保存修改，已暂停自动刷新';
+return;
+}
+loadConf(true)
+}
 function switchConfTab(name,el){
 document.querySelectorAll('.config-panel').forEach(function(x){x.classList.remove('on')});
 document.querySelectorAll('#confTabs .tab-btn').forEach(function(x){x.classList.remove('on')});
 var p=document.getElementById('cfg-'+name);if(p)p.classList.add('on');
 if(el)el.classList.add('on');
 if(name==='json')syncJsonFromVisualConfig();
+}
+function markConfigDirty(){
+if(!_configLoaded)return;
+_configDirty=true;
+var msg=document.getElementById('confMsg');if(msg)msg.textContent='有未保存修改';
+}
+function bindConfigDirtyWatchers(){
+document.querySelectorAll('[data-cfg-path],#confEd').forEach(function(el){
+if(el.dataset.dirtyBound)return;
+el.dataset.dirtyBound='1';
+el.addEventListener('input',markConfigDirty);
+el.addEventListener('change',markConfigDirty);
+});
 }
 function cfgGet(obj,path,def){
 var cur=obj||{},parts=path.split('.');
@@ -1351,12 +1375,20 @@ function syncJsonFromVisualConfig(){
 document.querySelectorAll('[data-cfg-path]').forEach(function(el){cfgSet(_configCache,el.dataset.cfgPath,cfgReadValue(el))});
 document.getElementById('confEd').value=JSON.stringify(_configCache,null,2);
 }
-async function loadConf(){
+async function loadConf(autoRefresh){
 try{
+if(autoRefresh&&_configDirty){
+var msg=document.getElementById('confMsg');if(msg)msg.textContent='配置有未保存修改，已暂停自动刷新';
+return;
+}
 var r=await api('GET','/api/config');
 _configCache=r||{};
+_configLoaded=false;
 document.getElementById('confEd').value=JSON.stringify(_configCache,null,2);
 syncVisualConfigFromJson();
+_configLoaded=true;
+_configDirty=false;
+bindConfigDirtyWatchers();
 document.getElementById('confMsg').textContent='已加载';
 }catch(e){toast('加载失败','err')}
 }
@@ -1367,7 +1399,7 @@ else syncJsonFromVisualConfig();
 var r=await api('POST','/api/config',_configCache);
 toast(r.message,r.ok?'ok':'err');
 document.getElementById('confMsg').textContent=r.ok?'已保存':'保存失败';
-if(r.ok)applySiteLogo(_configCache.site||{});
+if(r.ok){_configDirty=false;applySiteLogo(_configCache.site||{});}
 }catch(e){toast('配置格式错误: '+e.message,'err')}
 }
 function previewSiteLogo(){
@@ -1375,6 +1407,28 @@ var prev=document.getElementById('siteLogoPreview');if(!prev)return;
 var svg=document.getElementById('siteLogoSvg').value.trim();
 var txt=(document.getElementById('siteLogoText').value.trim()||'BL').slice(0,8);
 renderLogoMark(prev,{logo_text:txt,logo_svg:svg});
+}
+function loadLogoSvgFile(input){
+var file=input&&input.files&&input.files[0];if(!file)return;
+if(!/\.svg$/i.test(file.name)&&file.type!=='image/svg+xml'){toast('请选择 SVG 文件','err');input.value='';return}
+var reader=new FileReader();
+reader.onload=function(){
+var svg=String(reader.result||'');
+if(!safeLogoSvg(svg)){toast('SVG 包含不支持或不安全的内容','err');input.value='';return}
+document.getElementById('siteLogoSvg').value=svg;
+previewSiteLogo();
+markConfigDirty();
+toast('SVG 已载入，保存后全站生效','ok');
+input.value='';
+};
+reader.onerror=function(){toast('读取 SVG 失败','err');input.value=''};
+reader.readAsText(file);
+}
+function clearLogoSvg(){
+var el=document.getElementById('siteLogoSvg');if(!el)return;
+el.value='';
+previewSiteLogo();
+markConfigDirty();
 }
 function applySiteLogo(site){
 site=site||{};
@@ -1399,6 +1453,18 @@ var h='';
 for(var i=0;i<rows.length;i++)h+='<div class="setting-card"><strong>'+esc(String(rows[i][0]))+'</strong><span>'+esc(String(rows[i][1]))+'</span></div>';
 var box=document.getElementById('agentSettingsGrid');if(box)box.innerHTML=h;
 }
+var agentSkillCatalog={
+full_plan:{label:'完整计划',hint:'按计划依次搜索 B 站视频、理解/观看结果并写入本轮记忆。'},
+search_bilibili_videos:{label:'搜索 B 站视频',hint:'只执行搜索步骤，适合先找候选视频，不会进入观看/总结。'},
+watch_bilibili_videos:{label:'理解/观看视频',hint:'先按目标搜索，再理解/观看候选视频，不额外写总结。'},
+write_memory:{label:'写入本轮记忆',hint:'只把目标作为本轮记忆/总结任务处理，不搜索视频。'}
+};
+function renderAgentSkillHelp(){
+var sel=document.getElementById('agentSkillSelect'),box=document.getElementById('agentSkillHelp');
+if(!sel||!box)return;
+var item=agentSkillCatalog[sel.value]||agentSkillCatalog.full_plan;
+box.innerHTML='<strong>'+esc(item.label)+'</strong> · '+esc(item.hint)+'<br>这里调用的是项目内 AgentSkillRunner 技能，不是 Codex 宿主的本地 SKILL.md。';
+}
 
 // ── PERSONA ──
 async function rf_psna(){
@@ -1415,6 +1481,7 @@ var active=items[act]||{};
 document.getElementById('activePersonaDetail').innerHTML='<div class="setting-card"><strong>'+esc(act||'-')+'</strong><span>'+esc(active.system_prompt||'未设置系统 Prompt')+'</span></div><div class="setting-card" style="margin-top:10px"><strong>表达风格</strong><span>'+esc(active.style||'-')+'</span></div><div class="setting-card" style="margin-top:10px"><strong>行为边界</strong><span>'+esc((active.rules||[]).join(' / ')||'-')+'</span></div>';
 if(!Object.keys(_configCache||{}).length){try{_configCache=await api('GET','/api/config')}catch(e){}}
 renderAgentSettings(_configCache);
+renderAgentSkillHelp();
 }catch(e){}
 }
 async function addPsna(){
@@ -1692,8 +1759,9 @@ async function runAgent(){
 var g=document.getElementById("agentGoal").value.trim();
 if(!g){toast("请输入目标描述","err");return}
 var persona=document.getElementById("agentPersonaSelect")?document.getElementById("agentPersonaSelect").value:"";
+var skill=document.getElementById("agentSkillSelect")?document.getElementById("agentSkillSelect").value:"full_plan";
 var mode=document.getElementById("agentMode")?document.getElementById("agentMode").value:"queue";
-var r=await api("POST","/api/action/agent-skill",{goal:g,persona:persona,mode:mode});toast(r.message,r.ok?"ok":"err")}
+var r=await api("POST","/api/action/agent-skill",{goal:g,persona:persona,skill:skill,mode:mode});toast(r.message,r.ok?"ok":"err")}
 async function kbOrganize(){
 if(!confirm("将对知识库进行AI自动分类整理，继续？"))return;
 var r=await api("POST","/api/action/kb-organize");toast(r.message,"ok")}
@@ -2453,6 +2521,48 @@ def api_action_send_danmaku():
     except Exception as e:
         return jsonify(dict(ok=False, message=str(e))), 400
 
+def _run_agent_skill(goal: str, skill: str, persona: str = ""):
+    if not COOKIE_FILE.exists():
+        log_line("Agent技能未启动: 请先在 B站登录页完成登录")
+        return
+
+    async def _run():
+        log_line(f"Agent技能开始执行: {skill} -> {goal}")
+        try:
+            import new_agent
+            brain = new_agent.AgentBrain()
+            login_success = await brain.initialize_login()
+            if not login_success:
+                log_line("Agent技能执行失败: B站登录不可用")
+                return
+            runner = getattr(brain, "agent_runner", None)
+            if runner is None:
+                from services.agent_service import AgentSkillRunner
+                runner = AgentSkillRunner(brain=brain)
+            result = await runner.run_goal(goal, skill=skill)
+            results = result.get("results", [])
+            ok_steps = sum(1 for item in results if item.get("result", {}).get("ok"))
+            log_line(f"Agent技能执行完成: {skill} -> {goal} ({ok_steps}/{len(results)} 步成功)")
+        except Exception as e:
+            log_line(f"Agent技能执行失败: {skill} -> {e}")
+
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_run())
+    finally:
+        loop.close()
+
+def _start_agent_skill_thread(goal: str, skill: str, persona: str = ""):
+    thread = threading.Thread(
+        target=_run_agent_skill,
+        args=(goal, skill, persona),
+        name="web-agent-skill",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
 @app.route('/api/action/agent-skill', methods=['POST'])
 def api_action_agent_skill():
     """执行 Agent 技能"""
@@ -2460,15 +2570,20 @@ def api_action_agent_skill():
         body = request.get_json(force=True)
         goal = (body.get('goal') or '').strip()
         persona = (body.get('persona') or '').strip()
+        skill = (body.get('skill') or 'full_plan').strip()
         mode = (body.get('mode') or 'queue').strip()
         if not goal:
             return jsonify(dict(ok=False, message='请输入目标描述')), 400
+        if mode in ('manual', 'dive'):
+            _start_agent_skill_thread(goal, skill, persona)
+            log_line(f"Agent技能已启动: {mode}/{skill} -> {goal}")
+            return jsonify(dict(ok=True, message=f'Agent任务已启动: {skill} / {goal}'))
         task_file = DATA_DIR / "web_action_queue.json"
         tasks = read_json(task_file, [])
-        tasks.append(dict(type='agent_skill', goal=goal, persona=persona, mode=mode, time=datetime.now().isoformat()))
+        tasks.append(dict(type='agent_skill', goal=goal, persona=persona, skill=skill, mode=mode, time=datetime.now().isoformat()))
         write_json(task_file, tasks)
-        log_line(f"Agent技能已排队: {goal}")
-        return jsonify(dict(ok=True, message=f'Agent任务已加入队列: {goal}'))
+        log_line(f"Agent技能已排队: {skill} -> {goal}")
+        return jsonify(dict(ok=True, message=f'Agent任务已加入队列: {skill} / {goal}'))
     except Exception as e:
         return jsonify(dict(ok=False, message=str(e))), 400
 

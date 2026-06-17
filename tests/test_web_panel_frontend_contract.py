@@ -1,7 +1,12 @@
 import re
 import unittest
 import ast
+import tempfile
+import shutil
+import sys
+import types
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 
 def _read_default_html():
@@ -47,7 +52,9 @@ class WebPanelFrontendContractTest(unittest.TestCase):
         self.assertIn('id="confVisual"', html)
         self.assertIn('id="siteLogoText"', html)
         self.assertIn('id="siteLogoSvg"', html)
+        self.assertIn('id="siteLogoFile"', html)
         self.assertIn('id="siteLogoPreview"', html)
+        self.assertIn("loadLogoSvgFile", html)
         self.assertIn("safeLogoSvg", html)
         self.assertIn("logoDataUri", html)
         self.assertIn("applySiteLogo", html)
@@ -56,6 +63,15 @@ class WebPanelFrontendContractTest(unittest.TestCase):
         self.assertIn("syncJsonFromVisualConfig", html)
         self.assertIn('<link rel="apple-touch-icon" href="{{SITE_ICON_DATA}}">', html)
         self.assertIn('<meta name="apple-mobile-web-app-capable" content="yes">', html)
+
+    def test_config_auto_refresh_respects_dirty_editing_state(self):
+        html = self.html
+
+        self.assertIn("var _configDirty=false", html)
+        self.assertIn("markConfigDirty", html)
+        self.assertIn("if(_configDirty)return", html)
+        self.assertIn("配置有未保存修改，已暂停自动刷新", html)
+        self.assertRegex(html, r"function rf_conf\(\)\{[\s\S]*?loadConf\(true\)")
 
     def test_standalone_pages_share_site_logo_and_ios_icons(self):
         source = Path("web_panel.py").read_text(encoding="utf-8")
@@ -75,9 +91,70 @@ class WebPanelFrontendContractTest(unittest.TestCase):
         self.assertIn("Agent 管理</button>", html)
         self.assertIn('id="agentGoal"', html)
         self.assertIn('id="agentMode"', html)
+        self.assertIn('id="agentSkillSelect"', html)
+        self.assertIn("agentSkillCatalog", html)
+        self.assertIn("renderAgentSkillHelp", html)
         self.assertIn('id="agentPersonaSelect"', html)
         self.assertIn('id="agentSettingsGrid"', html)
         self.assertIn("renderAgentSettings", html)
+
+    def test_agent_skill_endpoint_persists_selected_skill(self):
+        source = Path("web_panel.py").read_text(encoding="utf-8")
+
+        self.assertIn("skill = (body.get('skill') or 'full_plan').strip()", source)
+        self.assertIn("skill=skill", source)
+        self.assertIn("Agent技能已排队: {skill}", source)
+
+    def test_agent_manual_mode_starts_project_skill_runner(self):
+        import web_panel
+
+        web_panel.app.config.update(TESTING=True)
+        data_dir = Path(tempfile.mkdtemp(prefix="bili-web-agent-test-"))
+        config_file = data_dir / "config.json"
+        try:
+            with patch.object(web_panel, "_start_agent_skill_thread") as start_thread, \
+                    patch.object(web_panel, "DATA_DIR", data_dir), \
+                    patch.object(web_panel, "CONFIG_FILE", config_file):
+                web_panel.write_json(config_file, {"web": {"username": "alice", "password": "secret"}})
+                with web_panel.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["disclaimer_agreed"] = True
+                        session["panel_authenticated"] = True
+                    response = client.post(
+                        "/api/action/agent-skill",
+                        json={
+                            "goal": "学习 Python 入门",
+                            "skill": "search_bilibili_videos",
+                            "mode": "manual",
+                            "persona": "默认人格",
+                        },
+                    )
+        finally:
+            shutil.rmtree(data_dir, ignore_errors=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["ok"], True)
+        start_thread.assert_called_once_with(
+            "学习 Python 入门",
+            "search_bilibili_videos",
+            "默认人格",
+        )
+
+    def test_agent_runner_does_not_enter_terminal_login_without_cookie(self):
+        import web_panel
+
+        fake_agent = types.SimpleNamespace(AgentBrain=Mock(side_effect=AssertionError("should not start AgentBrain")))
+        missing_cookie = Path(tempfile.mkdtemp(prefix="bili-web-agent-no-cookie-")) / "missing.json"
+        try:
+            with patch.object(web_panel, "COOKIE_FILE", missing_cookie), \
+                    patch.object(web_panel, "log_line") as log_line, \
+                    patch.dict(sys.modules, {"new_agent": fake_agent}):
+                web_panel._run_agent_skill("学习 Python 入门", "search_bilibili_videos", "默认人格")
+
+            fake_agent.AgentBrain.assert_not_called()
+            self.assertTrue(any("请先在 B站登录页完成登录" in str(call.args[0]) for call in log_line.call_args_list))
+        finally:
+            shutil.rmtree(missing_cookie.parent, ignore_errors=True)
 
     def test_main_ui_does_not_use_emoji_as_icons(self):
         html = self.html
