@@ -57,6 +57,17 @@ class WebPanelFrontendContractTest(unittest.TestCase):
         self.assertIn('<link rel="apple-touch-icon" href="{{SITE_ICON_DATA}}">', html)
         self.assertIn('<meta name="apple-mobile-web-app-capable" content="yes">', html)
 
+    def test_standalone_pages_share_site_logo_and_ios_icons(self):
+        source = Path("web_panel.py").read_text(encoding="utf-8")
+
+        self.assertIn("def _site_head_tags", source)
+        self.assertIn("def _apply_site_chrome", source)
+        self.assertIn('<link rel="apple-touch-icon" href="{site["icon_data"]}">', source)
+        self.assertIn('<link rel="icon" href="{site["icon_data"]}">', source)
+        self.assertGreaterEqual(source.count("{{SITE_HEAD_TAGS}}"), 3)
+        self.assertEqual(source.count('<div class="auth-logo">{{SITE_LOGO_MARK}}</div>'), 3)
+        self.assertIn("return _apply_site_chrome(r\"\"\"<!DOCTYPE html>", source)
+
     def test_persona_and_agent_management_are_merged(self):
         html = self.html
 

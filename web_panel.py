@@ -146,6 +146,30 @@ def _site_branding(config=None):
     icon_data = 'data:image/svg+xml;charset=utf-8,' + quote(icon_svg)
     return dict(logo_text=logo_text, brand_name=brand_name, logo_svg=logo_svg, icon_data=icon_data)
 
+def _site_head_tags(title: str, site=None) -> str:
+    """Shared browser/iOS metadata for every web-facing page."""
+    site = site if site is not None else _site_branding()
+    page_title = f"{title} · {site['brand_name']}" if title else site['brand_name']
+    return (
+        f"<title>{_html_escape(page_title)}</title>\n"
+        '<meta name="theme-color" content="#f5f4ed">\n'
+        '<meta name="apple-mobile-web-app-capable" content="yes">\n'
+        f'<meta name="apple-mobile-web-app-title" content="{_html_escape(site["brand_name"])}">\n'
+        '<meta name="apple-mobile-web-app-status-bar-style" content="default">\n'
+        f'<link rel="icon" href="{site["icon_data"]}">\n'
+        f'<link rel="apple-touch-icon" href="{site["icon_data"]}">'
+    )
+
+def _apply_site_chrome(html: str, title: str) -> str:
+    """Apply configured logo and app metadata to standalone auth/disclaimer pages."""
+    site = _site_branding()
+    logo_mark = site['logo_svg'] or _html_escape(site['logo_text'])
+    return (
+        html.replace('{{SITE_HEAD_TAGS}}', _site_head_tags(title, site))
+            .replace('{{SITE_BRAND_NAME}}', _html_escape(site['brand_name']))
+            .replace('{{SITE_LOGO_MARK}}', logo_mark)
+    )
+
 def file_stat(path: Path):
     if not path.exists(): return {"exists": False, "size": 0, "mtime": None, "size_fmt": "0 B"}
     s = path.stat()
@@ -2712,18 +2736,21 @@ def api_behavior_save():
 
 # ── 免责声明 HTML 页面 ──
 def _disclaimer_html():
-    return r"""<!DOCTYPE html>
+    return _apply_site_chrome(r"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
-<title>免责声明</title>
+{{SITE_HEAD_TAGS}}
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{--bg:#f5f4ed;--surface:#faf9f5;--white:#fff;--fg:#141413;--text:#4d4c48;--text2:#5e5d59;--muted:#5e5d59;--sand:#e8e6dc;--line:#f0eee6;--ring:#d1cfc5;--accent:#c96442;--red:#b53333;--green:#64735b;--focus:#3898ec;--font-serif:Georgia,"Times New Roman","Songti SC",serif;--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;--shadow:rgba(20,20,19,.08) 0 18px 52px}
 body{font-family:var(--font-sans);background:radial-gradient(circle at 80% 12%,rgba(201,100,66,.08),transparent 28%),var(--bg);color:var(--fg);display:flex;align-items:center;justify-content:center;min-height:100vh;line-height:1.55;padding:20px}
 .card{background:rgba(250,249,245,.96);backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:18px;padding:34px 30px;max-width:520px;width:min(520px,100%);text-align:center;box-shadow:var(--shadow)}
+.auth-logo{width:52px;height:52px;margin:0 auto 16px;border-radius:15px;background:var(--fg);color:var(--surface);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:20px;overflow:hidden;box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
+.auth-logo svg{width:100%;height:100%;display:block}
 .card h2{font-family:var(--font-serif);color:var(--fg);font-size:clamp(28px,4vw,36px);font-weight:500;line-height:1.12;margin-bottom:14px}
+.brand-name{font-size:12px;color:var(--muted);margin:-6px 0 14px}
 .card .lines{background:var(--white);border:1px solid var(--sand);border-radius:14px;padding:18px 20px;margin-bottom:20px;font-size:15px;line-height:1.85;text-align:left;color:var(--text)}
 .card .lines .en{font-size:12px;color:var(--muted);margin-top:8px;display:block}
 .inp-row{display:flex;gap:10px;align-items:stretch}
@@ -2743,7 +2770,9 @@ body{font-family:var(--font-sans);background:radial-gradient(circle at 80% 12%,r
 </head>
 <body>
 <div class="card">
+<div class="auth-logo">{{SITE_LOGO_MARK}}</div>
 <h2>免责声明 / DISCLAIMER</h2>
+<p class="brand-name">{{SITE_BRAND_NAME}}</p>
 <div class="lines">
 本项目仅供学习参考，<br>
 若因使用本项目产生任何后果，本人一概不负责。
@@ -2774,21 +2803,23 @@ else{msg.textContent='✗ 请输入"我同意"';msg.className='msg err';btn.disa
 }
 </script>
 </body>
-</html>"""
+</html>""", "免责声明")
 
 # ── 首次设置页面（配置用户名和密码）──
 def _setup_html():
-    return r"""<!DOCTYPE html>
+    return _apply_site_chrome(r"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
-<title>首次设置 · 管理面板</title>
+{{SITE_HEAD_TAGS}}
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{--bg:#f5f4ed;--surface:#faf9f5;--white:#fff;--fg:#141413;--text:#4d4c48;--text2:#5e5d59;--muted:#5e5d59;--sand:#e8e6dc;--line:#f0eee6;--ring:#d1cfc5;--accent:#c96442;--red:#b53333;--green:#64735b;--focus:#3898ec;--font-serif:Georgia,"Times New Roman","Songti SC",serif;--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;--shadow:rgba(20,20,19,.08) 0 18px 52px}
 body{font-family:var(--font-sans);background:radial-gradient(circle at 80% 12%,rgba(201,100,66,.08),transparent 28%),var(--bg);color:var(--fg);display:flex;align-items:center;justify-content:center;min-height:100vh;line-height:1.55;padding:20px}
 .card{background:rgba(250,249,245,.96);backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:18px;padding:34px 30px;max-width:440px;width:min(440px,100%);text-align:center;box-shadow:var(--shadow)}
+.auth-logo{width:52px;height:52px;margin:0 auto 16px;border-radius:15px;background:var(--fg);color:var(--surface);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:20px;overflow:hidden;box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
+.auth-logo svg{width:100%;height:100%;display:block}
 .card h2{font-family:var(--font-serif);color:var(--fg);font-size:clamp(28px,4vw,36px);font-weight:500;line-height:1.12;margin-bottom:8px}
 .card .sub{font-size:13px;color:var(--muted);margin-bottom:20px}
 .fg{margin-bottom:14px;text-align:left}
@@ -2810,8 +2841,9 @@ body{font-family:var(--font-sans);background:radial-gradient(circle at 80% 12%,r
 </head>
 <body>
 <div class="card">
+<div class="auth-logo">{{SITE_LOGO_MARK}}</div>
 <h2>首次设置</h2>
-<p class="sub">欢迎使用 B站 AI 管理系统<br>请设置管理面板的用户名和密码</p>
+<p class="sub">欢迎使用 {{SITE_BRAND_NAME}}<br>请设置管理面板的用户名和密码</p>
 <div class="fg"><label>用户名</label><input id="setupUser" type="text" placeholder="设置用户名" autocomplete="off" autofocus></div>
 <div class="fg"><label>密码</label><input id="setupPass" type="password" placeholder="设置密码（至少4位）" autocomplete="off"></div>
 <div class="fg"><label>确认密码</label><input id="setupPass2" type="password" placeholder="再次输入密码" autocomplete="off"></div>
@@ -2838,21 +2870,23 @@ else{msg.textContent='✗ '+d.message;msg.className='msg err';btn.disabled=false
 }
 </script>
 </body>
-</html>"""
+</html>""", "首次设置")
 
 # ── 登录页面 ──
 def _login_html():
-    return r"""<!DOCTYPE html>
+    return _apply_site_chrome(r"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
-<title>登录 · 管理面板</title>
+{{SITE_HEAD_TAGS}}
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{--bg:#f5f4ed;--surface:#faf9f5;--white:#fff;--fg:#141413;--text:#4d4c48;--text2:#5e5d59;--muted:#5e5d59;--sand:#e8e6dc;--line:#f0eee6;--ring:#d1cfc5;--accent:#c96442;--red:#b53333;--green:#64735b;--focus:#3898ec;--font-serif:Georgia,"Times New Roman","Songti SC",serif;--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;--shadow:rgba(20,20,19,.08) 0 18px 52px}
 body{font-family:var(--font-sans);background:radial-gradient(circle at 80% 12%,rgba(201,100,66,.08),transparent 28%),var(--bg);color:var(--fg);display:flex;align-items:center;justify-content:center;min-height:100vh;line-height:1.55;padding:20px}
 .card{background:rgba(250,249,245,.96);backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:18px;padding:34px 30px;max-width:400px;width:min(400px,100%);text-align:center;box-shadow:var(--shadow)}
+.auth-logo{width:52px;height:52px;margin:0 auto 16px;border-radius:15px;background:var(--fg);color:var(--surface);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:20px;overflow:hidden;box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
+.auth-logo svg{width:100%;height:100%;display:block}
 .card h2{font-family:var(--font-serif);color:var(--fg);font-size:clamp(28px,4vw,36px);font-weight:500;line-height:1.12;margin-bottom:8px}
 .card .sub{font-size:13px;color:var(--muted);margin-bottom:20px}
 .fg{margin-bottom:14px;text-align:left}
@@ -2873,8 +2907,9 @@ body{font-family:var(--font-sans);background:radial-gradient(circle at 80% 12%,r
 </head>
 <body>
 <div class="card">
+<div class="auth-logo">{{SITE_LOGO_MARK}}</div>
 <h2>登录管理面板</h2>
-<p class="sub">请输入用户名和密码</p>
+<p class="sub">{{SITE_BRAND_NAME}}<br>请输入用户名和密码</p>
 <div class="fg"><label>用户名</label><input id="loginUser" type="text" placeholder="用户名" autocomplete="off" autofocus></div>
 <div class="fg"><label>密码</label><input id="loginPass" type="password" placeholder="密码" autocomplete="off"></div>
 <button class="btn" id="loginBtn" onclick="doLogin()">登 录</button>
@@ -2897,7 +2932,7 @@ else{msg.textContent='✗ '+d.message;msg.className='msg err';btn.disabled=false
 }
 </script>
 </body>
-</html>"""
+</html>""", "登录")
 
 # ── 免责声明确认页（Web端）──
 @app.route('/disclaimer')
