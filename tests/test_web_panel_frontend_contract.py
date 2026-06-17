@@ -51,11 +51,11 @@ class WebPanelFrontendContractTest(unittest.TestCase):
 
         self.assertIn('id="confVisual"', html)
         self.assertIn('id="siteLogoText"', html)
-        self.assertIn('id="siteLogoSvg"', html)
+        self.assertIn('id="siteLogoImage"', html)
         self.assertIn('id="siteLogoFile"', html)
         self.assertIn('id="siteLogoPreview"', html)
-        self.assertIn("loadLogoSvgFile", html)
-        self.assertIn("safeLogoSvg", html)
+        self.assertIn("loadLogoImageFile", html)
+        self.assertIn("safeLogoImage", html)
         self.assertIn("logoDataUri", html)
         self.assertIn("applySiteLogo", html)
         self.assertIn('id="siteLogoMark">{{SITE_LOGO_MARK}}</div>', html)
@@ -72,6 +72,24 @@ class WebPanelFrontendContractTest(unittest.TestCase):
         self.assertIn("if(_configDirty)return", html)
         self.assertIn("配置有未保存修改，已暂停自动刷新", html)
         self.assertRegex(html, r"function rf_conf\(\)\{[\s\S]*?loadConf\(true\)")
+
+    def test_api_helper_reports_json_errors_instead_of_parsing_html(self):
+        html = self.html
+
+        self.assertIn("var ct=r.headers.get('content-type')||''", html)
+        self.assertIn("登录状态已失效，请重新登录或确认免责声明", html)
+        self.assertIn("throw new Error(data.message||('请求失败: '+r.status))", html)
+
+    def test_model_config_explains_single_provider_multiple_model_roles(self):
+        html = self.html
+
+        self.assertIn("一个 API Key / Base URL 可以同时服务多个用途", html)
+        self.assertIn('data-cfg-path="models.chat"', html)
+        self.assertIn('data-cfg-path="models.vision"', html)
+        self.assertIn('data-cfg-path="models.image"', html)
+        self.assertIn('data-cfg-path="models.embedding"', html)
+        self.assertIn('data-cfg-path="fallback_models.image"', html)
+        self.assertIn('data-cfg-path="fallback_models.embedding"', html)
 
     def test_standalone_pages_share_site_logo_and_ios_icons(self):
         source = Path("web_panel.py").read_text(encoding="utf-8")
@@ -217,13 +235,58 @@ class WebPanelFrontendContractTest(unittest.TestCase):
         icon_emoji = "📊🎮🔑⚙️🎭💡⚡👥💬👤🧠📖📋🎓🔧💾ℹ️🤖✅❌📷🚪🔍🔄⏳⭐➕🚀🎙️📚📂📦⏱📝📄📱📡🛡️📹📤📥👁🔥▶⏹☑☐✍️🎨⚠️⚠"
         self.assertFalse(set(icon_emoji).intersection(html))
 
-    def test_custom_logo_svg_is_sanitized_server_side(self):
+    def test_custom_logo_image_is_sanitized_server_side(self):
         source = Path("web_panel.py").read_text(encoding="utf-8")
 
-        self.assertIn("def _sanitize_logo_svg", source)
-        self.assertIn("site['logo_svg'] = _sanitize_logo_svg", source)
-        self.assertIn(r"<\s*script\b", source)
-        self.assertIn(r"\son[a-z]+\s*=", source)
+        self.assertIn("def _sanitize_logo_image", source)
+        self.assertIn("site['logo_image'] = _sanitize_logo_image", source)
+        self.assertIn("image/png", source)
+        self.assertIn("image/jpeg", source)
+        self.assertIn("image/webp", source)
+
+    def test_config_api_returns_json_when_authentication_is_missing(self):
+        import web_panel
+
+        data_dir = Path(tempfile.mkdtemp(prefix="bili-config-auth-test-"))
+        config_file = data_dir / "config.json"
+        try:
+            with patch.object(web_panel, "DATA_DIR", data_dir), patch.object(web_panel, "CONFIG_FILE", config_file):
+                web_panel.app.config.update(TESTING=True)
+                web_panel.write_json(config_file, {"web": {"username": "alice", "password": "secret"}})
+                with web_panel.app.test_client() as client:
+                    response = client.post("/api/config", json={"site": {"logo_text": "BL"}})
+
+            self.assertEqual(response.status_code, 401)
+            self.assertEqual(response.content_type.split(";")[0], "application/json")
+            self.assertEqual(response.get_json()["ok"], False)
+        finally:
+            shutil.rmtree(data_dir, ignore_errors=True)
+
+    def test_config_api_preserves_regular_image_logo_data_url(self):
+        import web_panel
+
+        data_dir = Path(tempfile.mkdtemp(prefix="bili-logo-image-test-"))
+        config_file = data_dir / "config.json"
+        logo = "data:image/png;base64,iVBORw0KGgo="
+        try:
+            with patch.object(web_panel, "DATA_DIR", data_dir), patch.object(web_panel, "CONFIG_FILE", config_file):
+                web_panel.app.config.update(TESTING=True)
+                web_panel.write_json(config_file, {"web": {"username": "alice", "password": "secret"}})
+                with web_panel.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["disclaimer_agreed"] = True
+                        session["panel_authenticated"] = True
+                    response = client.post("/api/config", json={
+                        "web": {"username": "alice", "password": "secret"},
+                        "site": {"brand_name": "Bili", "logo_text": "BL", "logo_image": logo},
+                    })
+                    saved = web_panel.read_json(config_file, {})
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()["ok"], True)
+            self.assertEqual(saved["site"]["logo_image"], logo)
+        finally:
+            shutil.rmtree(data_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

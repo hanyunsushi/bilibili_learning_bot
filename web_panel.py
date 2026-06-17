@@ -5,7 +5,7 @@ bilibili_learning_bot · Web 管理面板
 功能：仪表盘 | 机器人启停 | B站扫码登录 | 配置编辑 | 实时日志
      人格管理 | 评论日志 | 用户画像 | 记忆知识库 | 日记进化 | 操作日志
 """
-import os, sys, json, time, io, base64, threading, asyncio, subprocess, signal, queue, hashlib, re, uuid as _uuid_module
+import os, sys, json, time, io, base64, binascii, threading, asyncio, subprocess, signal, queue, hashlib, re, uuid as _uuid_module
 from html import escape as _html_escape
 from urllib.parse import quote
 from datetime import datetime
@@ -193,15 +193,45 @@ def _sanitize_logo_svg(svg: str) -> str:
         return ''
     return svg
 
+def _sanitize_logo_image(image: str) -> str:
+    """Accept small ordinary image data URLs for site logos."""
+    image = (image or '').strip()
+    if not image or len(image) > 1400000:
+        return ''
+    match = re.match(r'^data:(image/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=\s]+)$', image, re.IGNORECASE)
+    if not match:
+        return ''
+    mime = match.group(1).lower()
+    payload = re.sub(r'\s+', '', match.group(2))
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError):
+        return ''
+    if not raw or len(raw) > 1024 * 1024:
+        return ''
+    signatures = {
+        'image/png': raw.startswith(b'\x89PNG\r\n\x1a\n'),
+        'image/jpeg': raw.startswith(b'\xff\xd8\xff'),
+        'image/webp': raw.startswith(b'RIFF') and len(raw) >= 12 and raw[8:12] == b'WEBP',
+        'image/gif': raw.startswith((b'GIF87a', b'GIF89a')),
+    }
+    if not signatures.get(mime, False):
+        return ''
+    return f'data:{mime};base64,{payload}'
+
 def _site_branding(config=None):
     """Return site logo/title values used by the main panel and web app icons."""
     config = config if config is not None else read_json(CONFIG_FILE, {})
     site = config.get('site', {}) if isinstance(config, dict) else {}
     logo_text = (site.get('logo_text') or 'BL').strip()[:8] or 'BL'
     brand_name = (site.get('brand_name') or 'B站 AI 管理系统').strip() or 'B站 AI 管理系统'
+    logo_image = _sanitize_logo_image(site.get('logo_image') or '')
     logo_svg = _sanitize_logo_svg(site.get('logo_svg') or '')
-    if logo_svg:
+    if logo_image:
+        icon_data = logo_image
+    elif logo_svg:
         icon_svg = logo_svg
+        icon_data = 'data:image/svg+xml;charset=utf-8,' + quote(icon_svg)
     else:
         icon_svg = (
             '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180">'
@@ -209,8 +239,13 @@ def _site_branding(config=None):
             f'<text x="90" y="108" text-anchor="middle" font-size="72" font-family="Arial, sans-serif" font-weight="700" fill="#faf9f5">{_html_escape(logo_text)}</text>'
             '</svg>'
         )
-    icon_data = 'data:image/svg+xml;charset=utf-8,' + quote(icon_svg)
-    return dict(logo_text=logo_text, brand_name=brand_name, logo_svg=logo_svg, icon_data=icon_data)
+        icon_data = 'data:image/svg+xml;charset=utf-8,' + quote(icon_svg)
+    return dict(logo_text=logo_text, brand_name=brand_name, logo_image=logo_image, logo_svg=logo_svg, icon_data=icon_data)
+
+def _site_logo_mark(site) -> str:
+    if site.get('logo_image'):
+        return f'<img src="{site["logo_image"]}" alt="Logo">'
+    return site.get('logo_svg') or _html_escape(site['logo_text'])
 
 def _site_head_tags(title: str, site=None) -> str:
     """Shared browser/iOS metadata for every web-facing page."""
@@ -229,11 +264,10 @@ def _site_head_tags(title: str, site=None) -> str:
 def _apply_site_chrome(html: str, title: str) -> str:
     """Apply configured logo and app metadata to standalone auth/disclaimer pages."""
     site = _site_branding()
-    logo_mark = site['logo_svg'] or _html_escape(site['logo_text'])
     return (
         html.replace('{{SITE_HEAD_TAGS}}', _site_head_tags(title, site))
             .replace('{{SITE_BRAND_NAME}}', _html_escape(site['brand_name']))
-            .replace('{{SITE_LOGO_MARK}}', logo_mark)
+            .replace('{{SITE_LOGO_MARK}}', _site_logo_mark(site))
     )
 
 def file_stat(path: Path):
@@ -465,8 +499,9 @@ def _load_html() -> str:
     html = html.replace('{{SITE_LOGO_TEXT}}', _html_escape(site['logo_text']))
     html = html.replace('{{SITE_BRAND_NAME}}', _html_escape(site['brand_name']))
     html = html.replace('{{SITE_ICON_DATA}}', site['icon_data'])
+    html = html.replace('{{SITE_LOGO_IMAGE}}', site['logo_image'])
     html = html.replace('{{SITE_LOGO_SVG}}', site['logo_svg'])
-    html = html.replace('{{SITE_LOGO_MARK}}', site['logo_svg'] or _html_escape(site['logo_text']))
+    html = html.replace('{{SITE_LOGO_MARK}}', _site_logo_mark(site))
     return html
 
 _DEFAULT_HTML = r'''<!DOCTYPE html>
@@ -507,7 +542,8 @@ a{color:var(--accent)}
 .sidebar.hide{transform:translateX(-100%)}
 .sb-hd{padding:18px 16px;border-bottom:1px solid rgba(232,230,220,.86);display:flex;align-items:center;gap:12px;min-height:66px}
 .sb-av{width:40px;height:40px;border-radius:12px;background:var(--fg);display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:650;color:var(--surface);flex-shrink:0;box-shadow:inset 0 0 0 1px rgba(255,255,255,.14);overflow:hidden}
-.sb-av svg{width:100%;height:100%;display:block}
+.sb-av svg,.sb-av img{width:100%;height:100%;display:block}
+.sb-av img{object-fit:cover}
 .sb-tt{font-size:15px;font-weight:650;line-height:1.2;color:var(--fg);letter-spacing:0}
 .sb-sub{font-size:11px;color:var(--faint);margin-top:2px}
 .sb-nav{flex:1;overflow-y:auto;padding:10px 10px 12px;scrollbar-width:none;-ms-overflow-style:none}
@@ -597,7 +633,8 @@ a{color:var(--accent)}
 .field-note{font-size:11px;color:var(--faint);margin-top:4px;line-height:1.45}
 .logo-row{display:grid;grid-template-columns:minmax(160px,220px) 1fr;gap:16px;align-items:start}
 .logo-preview{width:120px;height:120px;border-radius:26px;background:var(--fg);color:var(--surface);display:flex;align-items:center;justify-content:center;font-size:36px;font-weight:750;overflow:hidden;box-shadow:var(--shadow-card);border:1px solid rgba(20,20,19,.08)}
-.logo-preview svg{width:100%;height:100%;display:block}
+.logo-preview svg,.logo-preview img{width:100%;height:100%;display:block}
+.logo-preview img{object-fit:cover}
 .settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
 .setting-card{background:var(--white);border:1px solid var(--sand);border-radius:14px;padding:13px 14px}
 .setting-card strong{display:block;color:var(--fg);font-size:13px;margin-bottom:4px}
@@ -788,12 +825,13 @@ a{color:var(--accent)}
 <div class="fg"><label>品牌名称</label><input id="siteBrandInput" data-cfg-path="site.brand_name" placeholder="B站 AI 管理系统"></div>
 <div class="fg"><label>文字 Logo</label><input id="siteLogoText" data-cfg-path="site.logo_text" maxlength="8" placeholder="BL" oninput="previewSiteLogo()"></div>
 </div>
-<div class="fg"><label>自定义 SVG Logo</label><textarea id="siteLogoSvg" data-cfg-path="site.logo_svg" placeholder="<svg ...>...</svg>" oninput="previewSiteLogo()"></textarea><div class="btn-grp"><input id="siteLogoFile" type="file" accept=".svg,image/svg+xml" style="display:none" onchange="loadLogoSvgFile(this)"><button class="btn btn-out" onclick="document.getElementById('siteLogoFile').click()">上传 SVG</button><button class="btn btn-out" onclick="clearLogoSvg()">清空 SVG</button></div><div class="field-note">留空时使用黑底白字自动生成图标；上传或填写 SVG 时会作为全站图标源。</div></div>
+<div class="fg"><label>Logo 图片</label><input id="siteLogoImage" data-cfg-path="site.logo_image" placeholder="上传 PNG / JPG / WebP / GIF 后自动填入" oninput="previewSiteLogo()"><div class="btn-grp"><input id="siteLogoFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif" style="display:none" onchange="loadLogoImageFile(this)"><button class="btn btn-out" onclick="document.getElementById('siteLogoFile').click()">上传图片</button><button class="btn btn-out" onclick="clearLogoImage()">清空图片</button></div><div class="field-note">支持普通图片，保存后会作为侧栏 Logo、favicon 和 Apple/iOS Web App 图标。留空时使用文字 Logo。</div></div>
 </div>
 </div>
 </div>
 
 <div class="config-panel" id="cfg-api">
+<div class="field-note" style="margin-bottom:12px">一个 API Key / Base URL 可以同时服务多个用途，不是只能用官方 OpenAI；也可以填任何提供 OpenAI 兼容 chat/completions、embeddings、images/generations 接口的服务商。不同用途在“模型”页填写对应模型名。</div>
 <div class="form-grid">
 <div class="fg"><label>API Key</label><input id="apiKeyInput" data-cfg-path="api.unified_api_key" type="password" autocomplete="off" placeholder="sk-..."></div>
 <div class="fg"><label>Base URL</label><input data-cfg-path="api.unified_base_url" placeholder="https://api.openai.com/v1"></div>
@@ -811,12 +849,21 @@ a{color:var(--accent)}
 </div>
 
 <div class="config-panel" id="cfg-models">
+<div class="field-note" style="margin-bottom:12px">这里不是让一个模型处理所有类型，而是在同一个 OpenAI 兼容 Provider 下，按用途分配模型：Chat 负责文本回复，Vision 负责视频抽帧/图片理解，Image 调用图片生成接口，Embedding 调用向量接口，Fast 用于低成本快速任务。</div>
 <div class="form-grid">
 <div class="fg"><label>Chat</label><input data-cfg-path="models.chat"></div>
 <div class="fg"><label>Vision</label><input data-cfg-path="models.vision"></div>
 <div class="fg"><label>Image</label><input data-cfg-path="models.image"></div>
 <div class="fg"><label>Fast</label><input data-cfg-path="models.fast"></div>
 <div class="fg"><label>Embedding</label><input data-cfg-path="models.embedding"></div>
+</div>
+<div class="field-note" style="margin:8px 0 12px">备用模型只在主模型失败时按相同角色兜底；如果你的服务商没有图片或 Embedding 能力，应换成支持这些 endpoint 的服务商或关闭依赖这些能力的功能。</div>
+<div class="form-grid">
+<div class="fg"><label>备用 Chat</label><input data-cfg-path="fallback_models.chat"></div>
+<div class="fg"><label>备用 Vision</label><input data-cfg-path="fallback_models.vision"></div>
+<div class="fg"><label>备用 Image</label><input data-cfg-path="fallback_models.image"></div>
+<div class="fg"><label>备用 Fast</label><input data-cfg-path="fallback_models.fast"></div>
+<div class="fg"><label>备用 Embedding</label><input data-cfg-path="fallback_models.embedding"></div>
 </div>
 </div>
 
@@ -1198,7 +1245,15 @@ else{s.classList.toggle('show');o.classList.toggle('show')}
 function toast(m,t){t=t||'inf';var x=document.getElementById('toast');x.textContent=m;x.className='toast '+t+' show';setTimeout(function(){x.classList.remove('show')},2200)}
 
 // ── API ──
-async function api(m,u,b){var o={method:m,headers:{'Content-Type':'application/json'}};if(b)o.body=JSON.stringify(b);var r=await fetch(u,o);return r.json()}
+async function api(m,u,b){
+var o={method:m,headers:{'Content-Type':'application/json'}};if(b)o.body=JSON.stringify(b);
+var r=await fetch(u,o);
+var ct=r.headers.get('content-type')||'',data=null;
+if(ct.indexOf('application/json')>=0){data=await r.json()}
+else{var txt=await r.text();if(r.status===401||r.redirected)throw new Error('登录状态已失效，请重新登录或确认免责声明');throw new Error((txt||'请求失败').slice(0,120))}
+if(!r.ok)throw new Error(data.message||('请求失败: '+r.status));
+return data;
+}
 
 // ── CHART HELPERS ──
 var _charts={};
@@ -1417,6 +1472,11 @@ if(el.dataset.cfgType==='bool')return el.value==='true';
 if(el.type==='number')return el.step&&el.step!=='1'?(parseFloat(el.value)||0):(parseInt(el.value)||0);
 return el.value;
 }
+function safeLogoImage(image){
+image=(image||'').trim();
+if(!image||image.length>1400000)return '';
+return /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=\s]+$/i.test(image)?image:'';
+}
 function safeLogoSvg(svg){
 svg=(svg||'').trim();
 if(!svg||svg.length>20000||!/^<svg[\s>]/i.test(svg))return '';
@@ -1430,6 +1490,8 @@ return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180"><rect widt
 function logoDataUri(site){
 site=site||{};
 var txt=(site.logo_text||'BL').slice(0,8);
+var img=safeLogoImage(site.logo_image);
+if(img)return img;
 var svg=safeLogoSvg(site.logo_svg)||fallbackLogoSvg(txt);
 return 'data:image/svg+xml;charset=utf-8,'+encodeURIComponent(svg);
 }
@@ -1437,6 +1499,8 @@ function renderLogoMark(el,site){
 if(!el)return;
 site=site||{};
 var txt=(site.logo_text||'BL').slice(0,8);
+var img=safeLogoImage(site.logo_image);
+if(img){el.innerHTML='<img src="'+img+'" alt="Logo">';return}
 var svg=safeLogoSvg(site.logo_svg);
 if(svg)el.innerHTML=svg;
 else el.textContent=txt;
@@ -1474,38 +1538,42 @@ document.getElementById('confMsg').textContent='已加载';
 }
 async function saveConf(){
 try{
-if(document.getElementById('cfg-json').classList.contains('on'))_configCache=JSON.parse(document.getElementById('confEd').value);
+if(document.getElementById('cfg-json').classList.contains('on')){
+try{_configCache=JSON.parse(document.getElementById('confEd').value)}
+catch(e){toast('配置格式错误: '+e.message,'err');document.getElementById('confMsg').textContent='JSON 格式错误';return}
+}
 else syncJsonFromVisualConfig();
 var r=await api('POST','/api/config',_configCache);
 toast(r.message,r.ok?'ok':'err');
 document.getElementById('confMsg').textContent=r.ok?'已保存':'保存失败';
 if(r.ok){_configDirty=false;applySiteLogo(_configCache.site||{});}
-}catch(e){toast('配置格式错误: '+e.message,'err')}
+}catch(e){toast('保存失败: '+e.message,'err');document.getElementById('confMsg').textContent='保存失败'}
 }
 function previewSiteLogo(){
 var prev=document.getElementById('siteLogoPreview');if(!prev)return;
-var svg=document.getElementById('siteLogoSvg').value.trim();
+var img=document.getElementById('siteLogoImage').value.trim();
 var txt=(document.getElementById('siteLogoText').value.trim()||'BL').slice(0,8);
-renderLogoMark(prev,{logo_text:txt,logo_svg:svg});
+renderLogoMark(prev,{logo_text:txt,logo_image:img});
 }
-function loadLogoSvgFile(input){
+function loadLogoImageFile(input){
 var file=input&&input.files&&input.files[0];if(!file)return;
-if(!/\.svg$/i.test(file.name)&&file.type!=='image/svg+xml'){toast('请选择 SVG 文件','err');input.value='';return}
+if(['image/png','image/jpeg','image/webp','image/gif'].indexOf(file.type)<0){toast('请选择 PNG、JPG、WebP 或 GIF 图片','err');input.value='';return}
+if(file.size>1024*1024){toast('Logo 图片不能超过 1MB','err');input.value='';return}
 var reader=new FileReader();
 reader.onload=function(){
-var svg=String(reader.result||'');
-if(!safeLogoSvg(svg)){toast('SVG 包含不支持或不安全的内容','err');input.value='';return}
-document.getElementById('siteLogoSvg').value=svg;
+var image=String(reader.result||'');
+if(!safeLogoImage(image)){toast('图片格式不支持','err');input.value='';return}
+document.getElementById('siteLogoImage').value=image;
 previewSiteLogo();
 markConfigDirty();
-toast('SVG 已载入，保存后全站生效','ok');
+toast('Logo 图片已载入，保存后全站生效','ok');
 input.value='';
 };
-reader.onerror=function(){toast('读取 SVG 失败','err');input.value=''};
-reader.readAsText(file);
+reader.onerror=function(){toast('读取图片失败','err');input.value=''};
+reader.readAsDataURL(file);
 }
-function clearLogoSvg(){
-var el=document.getElementById('siteLogoSvg');if(!el)return;
+function clearLogoImage(){
+var el=document.getElementById('siteLogoImage');if(!el)return;
 el.value='';
 previewSiteLogo();
 markConfigDirty();
@@ -2152,6 +2220,7 @@ def api_config():
         if isinstance(data, dict):
             site = data.get('site')
             if isinstance(site, dict):
+                site['logo_image'] = _sanitize_logo_image(site.get('logo_image') or '')
                 site['logo_svg'] = _sanitize_logo_svg(site.get('logo_svg') or '')
         ok = write_json(CONFIG_FILE, data)
         return jsonify(dict(ok=ok, message='配置已保存' if ok else '保存失败'))
@@ -3044,7 +3113,8 @@ def _disclaimer_html():
 body{font-family:var(--font-sans);background:radial-gradient(circle at 80% 12%,rgba(201,100,66,.08),transparent 28%),var(--bg);color:var(--fg);display:flex;align-items:center;justify-content:center;min-height:100vh;line-height:1.55;padding:20px}
 .card{background:rgba(250,249,245,.96);backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:18px;padding:34px 30px;max-width:520px;width:min(520px,100%);text-align:center;box-shadow:var(--shadow)}
 .auth-logo{width:52px;height:52px;margin:0 auto 16px;border-radius:15px;background:var(--fg);color:var(--surface);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:20px;overflow:hidden;box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
-.auth-logo svg{width:100%;height:100%;display:block}
+.auth-logo svg,.auth-logo img{width:100%;height:100%;display:block}
+.auth-logo img{object-fit:cover}
 .card h2{font-family:var(--font-serif);color:var(--fg);font-size:clamp(28px,4vw,36px);font-weight:500;line-height:1.12;margin-bottom:14px}
 .brand-name{font-size:12px;color:var(--muted);margin:-6px 0 14px}
 .card .lines{background:var(--white);border:1px solid var(--sand);border-radius:14px;padding:18px 20px;margin-bottom:20px;font-size:15px;line-height:1.85;text-align:left;color:var(--text)}
@@ -3115,7 +3185,8 @@ def _setup_html():
 body{font-family:var(--font-sans);background:radial-gradient(circle at 80% 12%,rgba(201,100,66,.08),transparent 28%),var(--bg);color:var(--fg);display:flex;align-items:center;justify-content:center;min-height:100vh;line-height:1.55;padding:20px}
 .card{background:rgba(250,249,245,.96);backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:18px;padding:34px 30px;max-width:440px;width:min(440px,100%);text-align:center;box-shadow:var(--shadow)}
 .auth-logo{width:52px;height:52px;margin:0 auto 16px;border-radius:15px;background:var(--fg);color:var(--surface);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:20px;overflow:hidden;box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
-.auth-logo svg{width:100%;height:100%;display:block}
+.auth-logo svg,.auth-logo img{width:100%;height:100%;display:block}
+.auth-logo img{object-fit:cover}
 .card h2{font-family:var(--font-serif);color:var(--fg);font-size:clamp(28px,4vw,36px);font-weight:500;line-height:1.12;margin-bottom:8px}
 .card .sub{font-size:13px;color:var(--muted);margin-bottom:20px}
 .fg{margin-bottom:14px;text-align:left}
@@ -3182,7 +3253,8 @@ def _login_html():
 body{font-family:var(--font-sans);background:radial-gradient(circle at 80% 12%,rgba(201,100,66,.08),transparent 28%),var(--bg);color:var(--fg);display:flex;align-items:center;justify-content:center;min-height:100vh;line-height:1.55;padding:20px}
 .card{background:rgba(250,249,245,.96);backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:18px;padding:34px 30px;max-width:400px;width:min(400px,100%);text-align:center;box-shadow:var(--shadow)}
 .auth-logo{width:52px;height:52px;margin:0 auto 16px;border-radius:15px;background:var(--fg);color:var(--surface);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:20px;overflow:hidden;box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
-.auth-logo svg{width:100%;height:100%;display:block}
+.auth-logo svg,.auth-logo img{width:100%;height:100%;display:block}
+.auth-logo img{object-fit:cover}
 .card h2{font-family:var(--font-serif);color:var(--fg);font-size:clamp(28px,4vw,36px);font-weight:500;line-height:1.12;margin-bottom:8px}
 .card .sub{font-size:13px;color:var(--muted);margin-bottom:20px}
 .fg{margin-bottom:14px;text-align:left}
@@ -3309,6 +3381,9 @@ def api_auth_status():
 # ── 面板认证检查（免责声明 + 首次设置 + 登录）──
 @app.before_request
 def _check_auth():
+    def api_auth_error(message: str):
+        return jsonify(dict(ok=False, message=message)), 401
+
     # 1. 先检查免责声明
     if not session.get('disclaimer_agreed'):
         if request.endpoint in ('disclaimer_page', 'api_disclaimer_confirm', 'static'):
@@ -3317,6 +3392,8 @@ def _check_auth():
             return None
         if request.path == '/disclaimer':
             return None
+        if request.path.startswith('/api/'):
+            return api_auth_error('登录状态已失效，请重新登录或确认免责声明')
         return redirect('/disclaimer')
 
     # 2. 检查面板是否已配置（首次使用）
@@ -3329,6 +3406,8 @@ def _check_auth():
             return None
         if request.path in ('/setup', '/api/auth/setup', '/api/auth/logout'):
             return None
+        if request.path.startswith('/api/'):
+            return api_auth_error('管理面板尚未完成首次设置')
         return redirect('/setup')
 
     # 3. 检查登录状态
@@ -3339,6 +3418,8 @@ def _check_auth():
         return None
     if request.path in ('/login', '/api/auth/login', '/api/auth/logout', '/api/auth/status'):
         return None
+    if request.path.startswith('/api/'):
+        return api_auth_error('登录状态已失效，请重新登录或确认免责声明')
     return redirect('/login')
 
 # ═══════════════════════════════════════════
