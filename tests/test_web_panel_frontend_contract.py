@@ -38,13 +38,26 @@ class WebPanelFrontendContractTest(unittest.TestCase):
         self.assertIsNotNone(nav_markup)
         self.assertNotRegex(nav_markup.group(1), r"<span class=\"ic\">[^<]+</span>")
 
-    def test_sidebar_active_and_hover_are_black_without_accent_edge(self):
+    def test_sidebar_hover_is_sand_and_active_is_black_without_accent_edge(self):
         html = self.html
 
-        self.assertIn(".ni:hover{background-color:var(--fg);color:var(--surface)", html)
+        self.assertIn(".sb-nav{flex:1;overflow-y:auto;padding:10px 10px 12px;display:grid;gap:4px", html)
+        self.assertIn(".ni:hover:not(.ac){background-color:var(--sand);color:var(--fg)", html)
         self.assertIn(".ni.ac{background-color:var(--fg);color:var(--surface)", html)
-        self.assertIn(".ni:hover .nav-ico,.ni.ac .nav-ico{background:rgba(255,255,255,.12);color:var(--surface);border-color:rgba(255,255,255,.18)}", html)
+        self.assertIn(".ni:hover:not(.ac) .nav-ico{background:var(--surface);color:var(--fg);border-color:var(--ring-color)}", html)
+        self.assertIn(".ni.ac .nav-ico{background:rgba(255,255,255,.12);color:var(--surface);border-color:rgba(255,255,255,.18)}", html)
         self.assertNotIn("box-shadow:inset 3px 0 0 var(--accent)", html)
+
+    def test_dashboard_stat_cards_are_compact_and_live_updated(self):
+        html = self.html
+
+        self.assertIn(".sr{display:grid;grid-template-columns:repeat(auto-fit,minmax(176px,1fr));gap:12px", html)
+        self.assertIn(".sc{background:rgba(250,249,245,.78);border:1px solid var(--line);border-radius:14px;padding:14px", html)
+        self.assertIn(".sv{font-size:17px;font-weight:650", html)
+        self.assertIn('class="sv" id="dashUptime"', html)
+        self.assertIn('class="sv" id="dashCost"', html)
+        self.assertIn("updateLiveUptime", html)
+        self.assertIn("setInterval(updateLiveUptime,1000)", html)
 
     def test_config_page_has_visual_editor_and_logo_controls(self):
         html = self.html
@@ -72,6 +85,12 @@ class WebPanelFrontendContractTest(unittest.TestCase):
         self.assertIn("if(_configDirty)return", html)
         self.assertIn("配置有未保存修改，已暂停自动刷新", html)
         self.assertRegex(html, r"function rf_conf\(\)\{[\s\S]*?loadConf\(true\)")
+
+    def test_auto_refresh_skips_form_editing_pages(self):
+        html = self.html
+
+        self.assertIn("var autoRefreshSkipPages={conf:1,psna:1,mood:1,behavior:1,tools:1,tutor:1,sys:1}", html)
+        self.assertIn("if(!autoRefreshSkipPages[id]&&window['rf_'+id])window['rf_'+id]()", html)
 
     def test_api_helper_reports_json_errors_instead_of_parsing_html(self):
         html = self.html
@@ -114,6 +133,12 @@ class WebPanelFrontendContractTest(unittest.TestCase):
         self.assertIn(".sys-actions{margin-top:14px", html)
         self.assertIn('<div class="sys-actions"><button class="btn btn-pr" onclick="exportConfig()">导出全部配置</button></div>', html)
         self.assertIn('<div class="sys-actions"><button class="btn btn-out" onclick="listBackups()">刷新备份列表</button></div>', html)
+        self.assertIn('var r=await api("GET","/api/import")', html)
+
+    def test_backup_list_api_accepts_frontend_get_request(self):
+        source = Path("web_panel.py").read_text(encoding="utf-8")
+
+        self.assertIn("@app.route('/api/import', methods=['GET', 'POST'])", source)
 
     def test_standalone_pages_share_site_logo_and_ios_icons(self):
         source = Path("web_panel.py").read_text(encoding="utf-8")
@@ -218,6 +243,42 @@ class WebPanelFrontendContractTest(unittest.TestCase):
         finally:
             shutil.rmtree(missing_cookie.parent, ignore_errors=True)
 
+    def test_start_bot_process_enters_main_run_menu_choice(self):
+        import web_panel
+
+        class FakePipe:
+            def readline(self):
+                return ""
+
+            def close(self):
+                pass
+
+        fake_stdin = Mock()
+        fake_stdin.closed = False
+        fake_process = types.SimpleNamespace(stdout=FakePipe(), stdin=fake_stdin)
+        old_process, old_running, old_start = web_panel.bot_process, web_panel.bot_running, web_panel.bot_start_time
+        web_panel.bot_process = None
+        web_panel.bot_running = False
+        web_panel.bot_start_time = None
+        try:
+            with patch.object(web_panel.subprocess, "Popen", return_value=fake_process):
+                ok, msg = web_panel.start_bot_process()
+        finally:
+            web_panel.bot_process = old_process
+            web_panel.bot_running = old_running
+            web_panel.bot_start_time = old_start
+
+        self.assertTrue(ok)
+        self.assertEqual(msg, "机器人已启动")
+        fake_stdin.write.assert_any_call("1\n")
+        fake_stdin.flush.assert_called()
+
+    def test_new_agent_respects_terminal_disclaimer_skip_env(self):
+        source = Path("new_agent.py").read_text(encoding="utf-8")
+
+        self.assertIn("BILI_DISCLAIMER_SKIP", source)
+        self.assertRegex(source, r"if not os\.getenv\('BILI_DISCLAIMER_SKIP'\):\s+_disclaimer_confirm\(\)")
+
     def test_prompt_skill_api_supports_global_and_persona_uploads(self):
         import web_panel
 
@@ -310,6 +371,124 @@ class WebPanelFrontendContractTest(unittest.TestCase):
             self.assertEqual(response.get_json()["ok"], True)
             self.assertEqual(saved["site"]["logo_image"], logo)
         finally:
+            shutil.rmtree(data_dir, ignore_errors=True)
+
+    def test_monitor_apis_normalize_runtime_data_shapes(self):
+        import web_panel
+
+        data_dir = Path(tempfile.mkdtemp(prefix="bili-monitor-shape-test-"))
+        config_file = data_dir / "config.json"
+        try:
+            with patch.object(web_panel, "DATA_DIR", data_dir), patch.object(web_panel, "CONFIG_FILE", config_file):
+                web_panel.app.config.update(TESTING=True)
+                web_panel.write_json(config_file, {"web": {"username": "alice", "password": "secret"}})
+                web_panel.write_json(data_dir / "comment_log.json", {
+                    "history": [
+                        {"timestamp": "2026-06-18T07:01:02", "action": "reply", "content": "测试评论", "target_user": "小明", "comment_id": "c1"}
+                    ]
+                })
+                web_panel.write_json(data_dir / "user_profiles.json", {
+                    "up::1": {"name": "测试UP", "affinity": 12, "impression": "讲解清楚", "last_seen": "2026-06-18T07:02:03"}
+                })
+                web_panel.write_json(data_dir / "bot_diary.json", {
+                    "diaries": [{"time": "2026-06-18T07:03:04", "title": "日记", "content": "今天学了很多", "energy": ""}]
+                })
+                web_panel.write_json(data_dir / "self_evolution.json", {
+                    "items": [{"time": "2026-06-18T07:04:05", "category": "style", "suggestion": "更克制"}]
+                })
+                web_panel.write_json(data_dir / "agent_skill_log.json", [
+                    {"created_at": "2026-06-18T07:05:06", "skill": "full_plan", "goal": "学习测试", "ok": True}
+                ])
+                web_panel.write_json(data_dir / "web_costs.json", {
+                    "total": 0,
+                    "calls": [{"model": "gpt-4.1-mini", "price": 0.0012, "purpose": "chat", "created_at": "2026-06-18T07:06:07"}]
+                })
+
+                with web_panel.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["disclaimer_agreed"] = True
+                        session["panel_authenticated"] = True
+                    comments = client.get("/api/comments?limit=5").get_json()
+                    users = client.get("/api/users").get_json()
+                    diary = client.get("/api/diary").get_json()
+                    actions = client.get("/api/actions?limit=5").get_json()
+                    charts = client.get("/api/charts").get_json()
+                    info = client.get("/api/info").get_json()
+
+            self.assertEqual(comments["items"][0]["content"], "测试评论")
+            self.assertIn("up::1", users["users"])
+            self.assertEqual(diary["diary"]["entries"][0]["content"], "今天学了很多")
+            self.assertEqual(diary["evolution"]["events"][0]["detail"], "更克制")
+            self.assertEqual(actions["items"][0]["action"], "full_plan")
+            self.assertEqual(len(charts["comments"]), 1)
+            self.assertEqual(len(charts["moods"]), 1)
+            self.assertEqual(len(charts["actions"]), 1)
+            self.assertAlmostEqual(info["cost_total"], 0.0012)
+        finally:
+            shutil.rmtree(data_dir, ignore_errors=True)
+
+    def test_config_api_merges_partial_updates_and_sanitizes_logo(self):
+        import web_panel
+
+        data_dir = Path(tempfile.mkdtemp(prefix="bili-config-merge-test-"))
+        config_file = data_dir / "config.json"
+        logo = "data:image/png;base64,iVBORw0KGgo="
+        try:
+            with patch.object(web_panel, "DATA_DIR", data_dir), patch.object(web_panel, "CONFIG_FILE", config_file):
+                web_panel.app.config.update(TESTING=True)
+                web_panel.write_json(config_file, {
+                    "web": {"username": "alice", "password": "secret"},
+                    "api": {"model_brain": "keep-me"},
+                    "behavior": {"comment_mode": "real"},
+                })
+                with web_panel.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["disclaimer_agreed"] = True
+                        session["panel_authenticated"] = True
+                    response = client.post("/api/config", json={"site": {"logo_image": logo}})
+                    saved = web_panel.read_json(config_file, {})
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()["ok"], True)
+            self.assertEqual(saved["site"]["logo_image"], logo)
+            self.assertEqual(saved["api"]["model_brain"], "keep-me")
+            self.assertEqual(saved["behavior"]["comment_mode"], "real")
+        finally:
+            shutil.rmtree(data_dir, ignore_errors=True)
+
+    def test_info_api_detects_external_new_agent_process(self):
+        import web_panel
+
+        data_dir = Path(tempfile.mkdtemp(prefix="bili-runtime-status-test-"))
+        config_file = data_dir / "config.json"
+        old_process, old_running, old_start = web_panel.bot_process, web_panel.bot_running, web_panel.bot_start_time
+        try:
+            with patch.object(web_panel, "DATA_DIR", data_dir), \
+                    patch.object(web_panel, "CONFIG_FILE", config_file), \
+                    patch.object(web_panel, "_find_new_agent_process", return_value=True):
+                web_panel.bot_process = None
+                web_panel.bot_running = False
+                web_panel.bot_start_time = None
+                web_panel.app.config.update(TESTING=True)
+                web_panel.write_json(config_file, {"web": {"username": "alice", "password": "secret"}})
+                web_panel.write_json(data_dir / "bot_runtime_state.json", {
+                    "current_start_at": "2026-06-18T07:00:00",
+                    "current_heartbeat_at": "2026-06-18T07:01:00",
+                })
+                with web_panel.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["disclaimer_agreed"] = True
+                        session["panel_authenticated"] = True
+                    response = client.get("/api/info")
+
+            payload = response.get_json()
+            self.assertTrue(payload["bot_running"])
+            self.assertEqual(payload["bot_start_time"], "2026-06-18 07:00:00")
+            self.assertIn("bot_uptime_seconds", payload)
+        finally:
+            web_panel.bot_process = old_process
+            web_panel.bot_running = old_running
+            web_panel.bot_start_time = old_start
             shutil.rmtree(data_dir, ignore_errors=True)
 
 

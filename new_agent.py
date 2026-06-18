@@ -124,6 +124,22 @@ def _mask_urls(text: str) -> str:
 _BOT_LOCK_FILE = None  # 延迟初始化，等 DATA_DIR 定义后再设
 _bot_lock_acquired = False
 
+def _pid_is_running_bot(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, OSError):
+        return False
+    cmdline_path = f"/proc/{pid}/cmdline"
+    try:
+        with open(cmdline_path, "rb") as f:
+            cmdline = f.read().replace(b"\x00", b" ").decode("utf-8", errors="ignore")
+        return "new_agent.py" in cmdline
+    except OSError:
+        # Non-Linux fallback: if the process exists, keep the conservative behavior.
+        return True
+
 def _acquire_bot_lock() -> bool:
     """获取 bot 单实例锁。成功返回 True，失败（已有实例运行）返回 False。"""
     global _BOT_LOCK_FILE, _bot_lock_acquired
@@ -137,12 +153,22 @@ def _acquire_bot_lock() -> bool:
         try:
             with open(_BOT_LOCK_FILE, 'r') as f:
                 old_pid = int(f.read().strip())
-            # 检查旧进程是否还活着（发 signal 0）
-            os.kill(old_pid, 0)
-            # 旧进程仍在运行
-            print(f"{Fore.RED}[LOCK] ❌ 已有 bot 实例正在运行 (PID: {old_pid})！"
-                  f"\n[LOCK] 请先停止旧实例或删除锁文件：{_BOT_LOCK_FILE}{Style.RESET_ALL}")
-            return False
+            if old_pid == os.getpid():
+                print(f"{Fore.YELLOW}[LOCK] ⚠ 清理当前进程遗留锁文件{Style.RESET_ALL}")
+                try:
+                    os.remove(_BOT_LOCK_FILE)
+                except OSError:
+                    pass
+            else:
+                if _pid_is_running_bot(old_pid):
+                    print(f"{Fore.RED}[LOCK] ❌ 已有 bot 实例正在运行 (PID: {old_pid})！"
+                          f"\n[LOCK] 请先停止旧实例或删除锁文件：{_BOT_LOCK_FILE}{Style.RESET_ALL}")
+                    return False
+                print(f"{Fore.YELLOW}[LOCK] ⚠ 清理过期锁文件 (PID已复用为非bot进程){Style.RESET_ALL}")
+                try:
+                    os.remove(_BOT_LOCK_FILE)
+                except OSError:
+                    pass
         except (ValueError, ProcessLookupError, OSError):
             # 旧进程已不存在或 PID 无效，清理过期锁文件
             print(f"{Fore.YELLOW}[LOCK] ⚠ 清理过期锁文件 (旧进程已不存在){Style.RESET_ALL}")
@@ -500,8 +526,8 @@ def provider_for_role(role):
         ),
         "model": (
             provider.get("model", "")
-            or _provider_env_value(role, "MODEL")
             or _model_for_role(role)
+            or _provider_env_value(role, "MODEL")
         ),
     }
 
@@ -5659,6 +5685,23 @@ class KnowledgeBaseClassifier:
         
         if topic_suggestion:
             clean_topic = sanitize_filename(topic_suggestion, is_folder=True)
+            if clean_topic:
+                log(f"使用AI建议分类: {clean_topic}", "KB")
+                selected_category = clean_topic
+                is_new = selected_category not in existing_categories
+                confidence = 1.0
+                log(f"AI分类结果: {selected_category} (置信度: {confidence:.2%}, 新分类: {is_new})", "KB")
+                final_category = self._create_category_structure(selected_category) if is_new else selected_category
+                if final_category not in self.metadata["file_index"]:
+                    self.metadata["file_index"][final_category] = []
+                self.metadata["file_index"][final_category].append({
+                    "bvid": bvid,
+                    "title": content_title,
+                    "added": datetime.now().isoformat()
+                })
+                self._sync_categories_from_file_index()
+                self._save_metadata()
+                return final_category
             for cat in existing_categories:
                 if clean_topic.lower() in cat.lower():
                     log(f"使用AI建议分类: {cat}", "KB")
@@ -6844,6 +6887,22 @@ async def web_search(query: str, limit: int = 5) -> list:
             log(f"[WARN] Wikipedia搜索失败: {e}", "WARN")
     return results
 
+async def _chat_text_with_configured_provider(messages, purpose="chat", request_timeout=120):
+    if ModelClient and load_modular_settings and BotState:
+        modular_settings = load_modular_settings()
+        return await ModelClient(modular_settings, BotState()).chat(
+            messages,
+            model_role="chat",
+            purpose=purpose,
+        )
+    resp = await _call_ai_with_retry_static(
+        MODEL_BRAIN,
+        messages,
+        request_timeout=request_timeout,
+        max_retries=0,
+    )
+    return resp.choices[0].message.content
+
 async def verify_knowledge_with_ai(knowledge_content: str, video_title: str, web_results: list = None) -> dict:
     """使用AI验证知识的真实性（结合联网搜索结果）。
     
@@ -6872,15 +6931,15 @@ async def verify_knowledge_with_ai(knowledge_content: str, video_title: str, web
 请逐条核实，判断是否有错误、过时或需要补充的内容。"""
     
     try:
-        resp = openai.ChatCompletion.create(
-            model=MODEL_BRAIN,
-            messages=[
+        raw = await _chat_text_with_configured_provider(
+            [
                 {"role": "system", "content": SYSTEM_PROMPT_KNOWLEDGE_VERIFY},
                 {"role": "user", "content": verify_context}
             ],
-            timeout=120
+            purpose="knowledge-verify",
+            request_timeout=120,
         )
-        raw = resp.choices[0].message.content.strip()
+        raw = raw.strip()
         start = raw.find("{")
         # [FIX] 嵌套匹配提取JSON，防止 rfind 被多花括号干扰
         if start >= 0:
@@ -8809,6 +8868,42 @@ class AgentBrain:
         except Exception as e:
             log(f"记录学习日志失败: {e}", "ERROR")
 
+    async def _generate_learning_summary(self, messages, fallback_context):
+        if ModelClient and load_modular_settings and BotState:
+            try:
+                modular_settings = load_modular_settings()
+                summary = await ModelClient(modular_settings, BotState()).chat(
+                    messages,
+                    model_role="chat",
+                    purpose="knowledge-summary",
+                )
+                if summary and summary.strip():
+                    return summary.strip()
+            except Exception as e:
+                log(f"ModelClient 知识总结失败，尝试兼容 AI 调用: {e}", "WARN")
+
+        try:
+            resp = await self._call_ai_with_retry(
+                model=MODEL_BRAIN,
+                messages=messages,
+                request_timeout=120,
+                _model_role="chat",
+            )
+            summary = resp.choices[0].message.content
+            if summary and summary.strip():
+                return summary.strip()
+        except Exception as e:
+            log(f"AI总结不可用，改为保底归档原始内容摘录: {e}", "WARN")
+
+        excerpt = str(fallback_context or "").strip()
+        if len(excerpt) > 3500:
+            excerpt = excerpt[:3500] + "\n\n...（原始内容较长，已截断）"
+        return (
+            "AI 总结暂不可用，已保存原始可学内容摘录，后续可在知识库中重新总结。\n\n"
+            "## 原始可学内容摘录\n\n"
+            f"{excerpt or '暂无可用摘录。'}"
+        )
+
     async def learn_from_video(self, bvid, title, up, url, subtitle_text, topic_suggestion, video_desc="", score=None, comment_summary=None):
         # 🔒 二次守卫：分数不达标直接拒绝归档
         if score is not None and score < LEARN_MIN_SCORE:
@@ -8854,14 +8949,13 @@ class AgentBrain:
             desc_context = f"【视频简介】\n{video_desc}\n\n" if video_desc else ""
             summary_context = f"视频标题: {title}\nUP主: {up}\n链接: {url}\n\n{desc_context}【视频字幕全文】:\n{subtitle_text}"
 
-            resp = openai.ChatCompletion.create(
-                model=MODEL_BRAIN,
-                messages=[
+            summary_content = await self._generate_learning_summary(
+                [
                     {"role": "system", "content": SYSTEM_PROMPT_SUMMARY},
                     {"role": "user", "content": summary_context}
-                ]
+                ],
+                summary_context,
             )
-            summary_content = resp.choices[0].message.content
             
             desc_section = f"- **简介**: {video_desc}\n" if video_desc else ""
             file_header = (
@@ -14884,8 +14978,9 @@ if __name__ == "__main__":
     if os.name == 'nt':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    # ── 免责声明确认（必须手动输入"我同意"）──
-    _disclaimer_confirm()
+    # ── 免责声明确认（Docker/Web 面板启动时可由环境变量跳过）──
+    if not os.getenv('BILI_DISCLAIMER_SKIP'):
+        _disclaimer_confirm()
 
     while True:
         show_main_menu()

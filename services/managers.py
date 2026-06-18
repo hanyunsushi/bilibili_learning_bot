@@ -151,6 +151,35 @@ class PersonaManager:
             lines.append(sp)
         return "\n".join(lines)
 
+    def evolve_active_persona(self, style_delta: str = "", relationship_delta: str = "", new_rule: str = "") -> dict:
+        """Apply a conservative evolution note to the active persona."""
+        name = self.get_active_persona()
+        self.data.setdefault("personas", {})
+        persona = self.data["personas"].setdefault(name, {
+            "name": "AI小助手",
+            "greeting": "你好！我是你的AI小助手~",
+            "style": "热情、专业",
+            "system_prompt": "",
+        })
+        history_item = {
+            "time": datetime.now().isoformat(),
+            "style_delta": style_delta,
+            "relationship_delta": relationship_delta,
+            "new_rule": new_rule,
+        }
+        persona.setdefault("evolution_history", []).append(history_item)
+        persona["evolution_history"] = persona["evolution_history"][-50:]
+        if style_delta:
+            persona["style_delta"] = style_delta
+        if relationship_delta:
+            persona["relationship_delta"] = relationship_delta
+        if new_rule:
+            rules = persona.setdefault("rules", [])
+            if new_rule not in rules:
+                rules.append(new_rule)
+        self._save()
+        return persona
+
     def recheck(self):
         self.data = self._load()
 
@@ -287,6 +316,17 @@ class UserProfileManager:
         new_val = max(-1.0, min(1.0, prof.get("affinity", 0.0) + delta))
         self.update_profile(user_id, {"affinity": new_val})
 
+    def adjust_affinity(self, user_id: str, user_name: str, delta: float, reason: str = "") -> dict:
+        prof = self.get_profile(user_id)
+        old_val = float(prof.get("affinity", 0.0)) if prof else 0.0
+        new_val = max(-1.0, min(1.0, old_val + (float(delta) / 10.0)))
+        self.update_profile(user_id, {
+            "name": user_name or prof.get("name") or user_id,
+            "affinity": new_val,
+            "last_reason": reason,
+        })
+        return self.get_profile(user_id)
+
     def update_impression(self, user_id: str, user_name: str, impression: str) -> dict:
         """记录对用户的印象/评价"""
         prof = self.get_profile(user_id)
@@ -333,17 +373,60 @@ class BotDiaryManager:
         return save_json_file(self.file_path, self.data)
 
     def add_entry(self, content: str, entry_type: str = "auto"):
-        self.data.setdefault("diaries", []).append({
+        entry = {
             "type": entry_type, "content": content,
             "time": datetime.now().isoformat()
-        })
+        }
+        self.data.setdefault("diaries", []).append(entry)
         self._save()
+        return entry
 
     def get_entries(self, limit: int = 20, entry_type: str = None) -> list:
         entries = self.data.get("diaries", [])
         if entry_type:
             entries = [e for e in entries if e.get("type") == entry_type]
         return entries[-limit:]
+
+    def list_entries(self, limit: int = 20, entry_type: str = None) -> list:
+        return self.get_entries(limit=limit, entry_type=entry_type)
+
+    async def generate_from_events(self, events: list, persona_block: str = "", mood: str = "", extra_note: str = "") -> dict:
+        recent = list(events or [])[-8:]
+        lines = []
+        for event in recent:
+            if not isinstance(event, dict):
+                continue
+            event_type = event.get("type", "event")
+            title = event.get("title") or event.get("goal") or event.get("action") or "未命名事件"
+            score = event.get("score")
+            actions = event.get("actions") or event.get("action") or ""
+            detail = f"- {event_type}: {title}"
+            if score not in (None, ""):
+                detail += f" | 评分 {score}"
+            if actions:
+                detail += f" | 操作 {actions}"
+            lines.append(detail)
+        if not lines:
+            lines.append("- 暂无足够事件，仅记录当前状态。")
+        title = f"自动日记 {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        content_parts = [f"# {title}", f"当前心情：{mood or '未知'}"]
+        if persona_block:
+            content_parts.append(str(persona_block).strip())
+        content_parts.append("## 近期事件")
+        content_parts.extend(lines)
+        if extra_note:
+            content_parts.extend(["## 额外备注", str(extra_note).strip()])
+        entry = {
+            "id": f"diary-{int(time.time() * 1000)}",
+            "title": title,
+            "type": "auto",
+            "content": "\n".join(content_parts),
+            "time": datetime.now().isoformat(),
+            "event_count": len(recent),
+        }
+        self.data.setdefault("diaries", []).append(entry)
+        self._save()
+        return entry
 
     def get_recent_summary(self, count: int = 5) -> str:
         entries = self.get_entries(count)
@@ -373,14 +456,62 @@ class SelfEvolutionManager:
         return save_json_file(self.file_path, self.data)
 
     def add_item(self, suggestion: str, category: str = "general"):
-        self.data.setdefault("items", []).append({
-            "category": category, "suggestion": suggestion,
-            "time": datetime.now().isoformat()
-        })
+        item = {
+            "id": f"evo-{int(time.time() * 1000)}",
+            "category": category,
+            "suggestion": suggestion,
+            "time": datetime.now().isoformat(),
+            "applied": False,
+            "status": "pending",
+        }
+        self.data.setdefault("items", []).append(item)
         self._save()
+        return item
 
     def get_items(self, limit: int = 20) -> list:
         return self.data.get("items", [])[-limit:]
+
+    async def reflect(self, events: list, persona_block: str = "", mood: str = "", diary_entries: list | None = None) -> dict:
+        recent = list(events or [])[-12:]
+        diary_entries = list(diary_entries or [])[-5:]
+        event_types = [str(item.get("type", "event")) for item in recent if isinstance(item, dict)]
+        high_scores = [
+            float(item.get("score"))
+            for item in recent
+            if isinstance(item, dict) and str(item.get("score", "")).replace(".", "", 1).isdigit()
+        ]
+        avg_score = round(sum(high_scores) / len(high_scores), 2) if high_scores else None
+        reflection = f"近期处理了 {len(recent)} 个事件"
+        if event_types:
+            reflection += f"，主要包括 {', '.join(sorted(set(event_types))[:4])}"
+        if avg_score is not None:
+            reflection += f"，平均评分 {avg_score}"
+        reflection += f"。当前心情为 {mood or '未知'}。"
+        parsed = {
+            "reflection": reflection,
+            "style_delta": "保持当前表达风格，优先记录真实触发条件。",
+            "relationship_delta": "",
+            "new_rule": "遇到高价值内容时优先沉淀可复用知识。",
+            "mood_delta": 0,
+        }
+        item = {
+            "id": f"evo-{int(time.time() * 1000)}",
+            "category": "auto_reflection",
+            "suggestion": parsed["new_rule"],
+            "parsed": parsed,
+            "raw": reflection,
+            "events_count": len(recent),
+            "diary_count": len(diary_entries),
+            "persona": persona_block,
+            "mood": mood,
+            "time": datetime.now().isoformat(),
+            "created_at": datetime.now().isoformat(),
+            "applied": False,
+            "status": "pending",
+        }
+        self.data.setdefault("items", []).append(item)
+        self._save()
+        return item
 
     def clear_items(self):
         self.data["items"] = []
@@ -390,11 +521,19 @@ class SelfEvolutionManager:
         return [i for i in self.data.get("items", [])
                 if i.get("status", "pending") == "pending"]
 
-    def mark_applied(self, index: int):
+    def mark_applied(self, index: int | str):
         items = self.data.get("items", [])
-        if 0 <= index < len(items):
-            items[index]["status"] = "applied"
+        target = None
+        if isinstance(index, str):
+            target = next((item for item in items if item.get("id") == index), None)
+        elif isinstance(index, int) and 0 <= index < len(items):
+            target = items[index]
+        if target is not None:
+            target["status"] = "applied"
+            target["applied"] = True
             self._save()
+            return True
+        return False
 
     def recheck(self):
         self.data = self._load()

@@ -91,6 +91,21 @@ class SettingsProviderRolesTest(unittest.TestCase):
         self.assertEqual(loaded.provider_for_role("chat")["base_url"], "https://chat.example/v1")
         self.assertEqual(loaded.provider_for_role("chat")["model"], "chat-model")
 
+    def test_configured_models_win_over_default_environment_models(self):
+        with patch.object(settings_module, "DATA_DIR", self.tmp), patch.object(settings_module, "CONFIG_FILE", self.config_file):
+            loaded = self._load_with(
+                {
+                    "api": {"unified_api_key": "unified-key", "unified_base_url": "https://unified.example/v1"},
+                    "models": {"chat": "config-chat-model"},
+                },
+                {
+                    "BILI_AI_MODEL_CHAT": "env-chat-model",
+                    "BILI_AI_CHAT_MODEL": "env-role-chat-model",
+                },
+            )
+
+        self.assertEqual(loaded.provider_for_role("chat")["model"], "config-chat-model")
+
     def test_public_config_does_not_expose_provider_api_keys(self):
         settings = settings_module.BotSettings(
             api_key="unified-key",
@@ -106,6 +121,12 @@ class SettingsProviderRolesTest(unittest.TestCase):
         self.assertEqual(public["providers"]["chat"]["model"], "chat-model")
         self.assertNotIn("api_key", public["providers"]["chat"])
         self.assertNotIn("secret-chat-key", repr(public))
+
+    def test_default_model_price_estimates_are_nonzero_for_accounting(self):
+        for model in ("gpt-4.1-mini", "gpt-4.1-nano", "gpt-image-1", "text-embedding-3-small"):
+            self.assertGreater(settings_module.MODEL_PRICES[model], 0)
+        self.assertGreater(settings_module.estimate_model_price("mimo-v2.5", "knowledge-summary"), 0)
+        self.assertGreater(settings_module.estimate_model_price("@cf/baai/bge-m3", "embedding"), 0)
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ bilibili_learning_bot · Web 管理面板
 import os, sys, json, time, io, base64, binascii, threading, asyncio, subprocess, signal, queue, hashlib, re, uuid as _uuid_module
 from html import escape as _html_escape
 from urllib.parse import quote
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # ── 线程安全 JSON 工具 ──
@@ -277,6 +277,193 @@ def file_stat(path: Path):
     return {"exists": True, "size": sz, "mtime": datetime.fromtimestamp(s.st_mtime).strftime("%m-%d %H:%M"),
             "size_fmt": f"{sz/1024:.1f}K" if sz<1024*1024 else f"{sz/1048576:.2f}M"}
 
+def _parse_dt(value) -> datetime | None:
+    text = str(value or '').strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace('Z', '+00:00')).replace(tzinfo=None)
+    except ValueError:
+        pass
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S'):
+        try:
+            return datetime.strptime(text[:19], fmt)
+        except ValueError:
+            continue
+    return None
+
+def _format_duration(seconds: int | float) -> str:
+    seconds = max(0, int(seconds or 0))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, sec = divmod(rem, 60)
+    if days:
+        return f"{days}d{hours}h{minutes}m"
+    return f"{hours}h{minutes}m{sec}s"
+
+def _deep_merge_dict(base: dict, patch: dict) -> dict:
+    result = dict(base or {})
+    for key, value in (patch or {}).items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge_dict(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+def _find_new_agent_process() -> bool:
+    proc = Path('/proc')
+    if not proc.exists():
+        return False
+    try:
+        for pid_dir in proc.iterdir():
+            if not pid_dir.name.isdigit():
+                continue
+            try:
+                cmdline = (pid_dir / 'cmdline').read_bytes().replace(b'\x00', b' ').decode('utf-8', 'ignore')
+            except OSError:
+                continue
+            if 'new_agent.py' in cmdline:
+                return True
+    except OSError:
+        return False
+    return False
+
+def _bot_runtime_status() -> dict:
+    global bot_running, bot_start_time
+    runtime = read_json(DATA_DIR / "bot_runtime_state.json", {})
+    handle_running = bool(bot_process and bot_process.poll() is None)
+    if bot_process and bot_process.poll() is not None:
+        bot_running = False
+    proc_running = handle_running or _find_new_agent_process()
+    heartbeat_at = _parse_dt(runtime.get('current_heartbeat_at') or runtime.get('last_seen_at'))
+    heartbeat_fresh = bool(heartbeat_at and datetime.now() - heartbeat_at < timedelta(minutes=5))
+    running = bool(proc_running or (not Path('/proc').exists() and heartbeat_fresh))
+    start_at = bot_start_time or _parse_dt(runtime.get('current_start_at'))
+    if running and not bot_start_time and start_at:
+        bot_start_time = start_at
+    uptime_seconds = int((datetime.now() - start_at).total_seconds()) if running and start_at else 0
+    return dict(
+        running=running,
+        started_at=start_at,
+        start_text=start_at.strftime('%Y-%m-%d %H:%M:%S') if start_at else None,
+        uptime=_format_duration(uptime_seconds),
+        uptime_seconds=max(0, uptime_seconds),
+        heartbeat_at=heartbeat_at.strftime('%Y-%m-%d %H:%M:%S') if heartbeat_at else '',
+    )
+
+def _cost_total(costs: dict) -> float:
+    if not isinstance(costs, dict):
+        return 0.0
+    total = float(costs.get('total') or 0.0)
+    calls_total = 0.0
+    try:
+        from xingye_bot.settings import estimate_model_price
+    except Exception:
+        def estimate_model_price(model, purpose=''):
+            return 0.0
+    for call in costs.get('calls') or []:
+        if isinstance(call, dict):
+            try:
+                price = float(call.get('price') or 0.0)
+            except (TypeError, ValueError):
+                price = 0.0
+            if price <= 0:
+                price = float(estimate_model_price(str(call.get('model') or ''), str(call.get('purpose') or '')) or 0.0)
+            calls_total += price
+    return round(max(total, calls_total), 6)
+
+def _num(value, default=0.0):
+    try:
+        if value in ('', None):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+def _normalize_comments(data: dict, limit: int) -> list[dict]:
+    raw = data.get('items') or data.get('history') or []
+    result = []
+    for it in raw[-limit:]:
+        if not isinstance(it, dict):
+            continue
+        time_text = it.get('time') or it.get('created_at') or it.get('timestamp') or ''
+        result.append(dict(
+            time=time_text,
+            type=it.get('type') or it.get('action') or 'comment',
+            content=it.get('content') or it.get('text') or it.get('reply') or '',
+            source=it.get('source') or it.get('target_user') or it.get('video_title') or '',
+            executed=it.get('executed', True),
+        ))
+    return result
+
+def _normalize_users(data: dict, web_data: dict) -> dict:
+    if not isinstance(data, dict):
+        data = {}
+    users = data.get('users') if isinstance(data.get('users'), dict) else {
+        key: value for key, value in data.items() if isinstance(value, dict)
+    }
+    web_users = web_data.get('users', {}) if isinstance(web_data, dict) else {}
+    return {**users, **web_users}
+
+def _normalize_diary(data: dict) -> dict:
+    raw = data.get('entries') or data.get('diaries') or data.get('items') or []
+    entries = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        entries.append(dict(
+            time=item.get('time') or item.get('created_at') or item.get('updated_at') or '',
+            title=item.get('title') or item.get('type') or '日记',
+            mood=item.get('mood') or item.get('current_mood') or '',
+            energy=_num(item.get('energy'), 50),
+            content=item.get('content') or item.get('summary') or '',
+            mood_score=_num(item.get('mood_score', item.get('valence')), 50),
+        ))
+    normalized = dict(data or {})
+    normalized['entries'] = entries
+    return normalized
+
+def _normalize_evolution(data: dict) -> dict:
+    raw = data.get('events') or data.get('items') or []
+    events = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        detail = item.get('detail') or item.get('suggestion') or item.get('raw') or item.get('title') or ''
+        events.append(dict(
+            time=item.get('time') or item.get('created_at') or item.get('updated_at') or '',
+            type=item.get('type') or item.get('category') or 'evolution',
+            detail=detail,
+            applied=bool(item.get('applied', False)),
+        ))
+    normalized = dict(data or {})
+    normalized['events'] = events
+    return normalized
+
+def _normalize_actions(data: dict, agent_log, limit: int) -> list[dict]:
+    raw = []
+    if isinstance(data, dict):
+        raw.extend(data.get('items') or [])
+    if isinstance(agent_log, list):
+        raw.extend(agent_log)
+    elif isinstance(agent_log, dict):
+        raw.extend(agent_log.get('items') or agent_log.get('logs') or [])
+    result = []
+    for item in raw[-limit:]:
+        if not isinstance(item, dict):
+            continue
+        action = item.get('action') or item.get('skill') or item.get('type') or 'agent'
+        payload = item.get('payload') if isinstance(item.get('payload'), dict) else {
+            key: item.get(key) for key in ('goal', 'persona', 'result', 'message') if key in item
+        }
+        result.append(dict(
+            time=item.get('created_at') or item.get('time') or item.get('updated_at') or '',
+            action=action,
+            payload=payload,
+            executed=bool(item.get('executed', item.get('ok', True))),
+        ))
+    return result
+
 def _cleanup_qr_images():
     """删除 qr_codes 文件夹中的所有二维码图片"""
     try:
@@ -412,6 +599,19 @@ def _bot_reader(pipe, prefix=""):
         except OSError as e:
             log_line(f"⚠ 关闭管道异常: {e}")
 
+def _send_bot_menu_choice(choice: str, label: str) -> bool:
+    if not bot_process or not bot_process.stdin or bot_process.stdin.closed:
+        log_line(f"⚠ 无法发送{label}指令：机器人输入管道不可用")
+        return False
+    try:
+        bot_process.stdin.write(f"{choice}\n")
+        bot_process.stdin.flush()
+        log_line(f"▶ 已发送{label}指令")
+        return True
+    except (BrokenPipeError, OSError, ValueError) as e:
+        log_line(f"⚠ 发送{label}指令失败 (管道断开): {e}")
+        return False
+
 def start_bot_process():
     global bot_process, bot_running, bot_start_time
     if bot_running:
@@ -426,6 +626,7 @@ def start_bot_process():
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUNBUFFERED"] = "1"
+        env["BILI_DISCLAIMER_SKIP"] = "1"
 
         bot_process = subprocess.Popen(
             [sys.executable, str(agent_path)],
@@ -444,6 +645,7 @@ def start_bot_process():
 
         threading.Thread(target=_bot_reader, args=(bot_process.stdout, ""), daemon=True).start()
         log_line("✅ 机器人进程已启动")
+        _send_bot_menu_choice("1", "主循环启动")
         return True, "机器人已启动"
     except Exception as e:
         log_line(f"❌ 启动失败: {e}")
@@ -456,12 +658,7 @@ def stop_bot_process():
     try:
         if bot_process:
             log_line("⏹ 正在停止机器人...")
-            try:
-                if bot_process.stdin and not bot_process.stdin.closed:
-                    bot_process.stdin.write("0\n")
-                    bot_process.stdin.flush()
-            except (BrokenPipeError, OSError, ValueError) as e:
-                log_line(f"⚠ 发送退出命令失败 (管道断开): {e}")
+            _send_bot_menu_choice("0", "退出")
             time.sleep(0.5)
             bot_process.terminate()
             try: bot_process.wait(timeout=8)
@@ -546,16 +743,17 @@ a{color:var(--accent)}
 .sb-av img{object-fit:cover}
 .sb-tt{font-size:15px;font-weight:650;line-height:1.2;color:var(--fg);letter-spacing:0}
 .sb-sub{font-size:11px;color:var(--faint);margin-top:2px}
-.sb-nav{flex:1;overflow-y:auto;padding:10px 10px 12px;scrollbar-width:none;-ms-overflow-style:none}
+.sb-nav{flex:1;overflow-y:auto;padding:10px 10px 12px;display:grid;gap:4px;align-content:start;scrollbar-width:none;-ms-overflow-style:none}
 .sb-nav::-webkit-scrollbar{display:none}
 .ns{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.08em;padding:16px 12px 6px;font-weight:650}
 .ni{appearance:none;-webkit-appearance:none;display:flex;align-items:center;gap:10px;min-height:38px;padding:8px 10px;border-radius:12px;cursor:pointer;color:var(--muted);font-size:13px;border:1px solid transparent;background-color:transparent;width:100%;transition:background-color .16s ease,color .16s ease,box-shadow .16s ease,transform .16s ease;text-align:left}
-.ni:hover{background-color:var(--fg);color:var(--surface);box-shadow:0 10px 24px rgba(20,20,19,.12)}
+.ni:hover:not(.ac){background-color:var(--sand);color:var(--fg);border-color:var(--ring-color);box-shadow:none}
 .ni:active{transform:translateY(1px)}
 .ni.ac{background-color:var(--fg);color:var(--surface);font-weight:650;border-color:var(--fg);box-shadow:0 10px 24px rgba(20,20,19,.14)}
 .nav-ico{width:26px;height:26px;border-radius:8px;background:rgba(232,230,220,.62);display:flex;align-items:center;justify-content:center;color:var(--fg);flex-shrink:0;border:1px solid rgba(209,207,197,.42)}
 .nav-ico svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-.ni:hover .nav-ico,.ni.ac .nav-ico{background:rgba(255,255,255,.12);color:var(--surface);border-color:rgba(255,255,255,.18)}
+.ni:hover:not(.ac) .nav-ico{background:var(--surface);color:var(--fg);border-color:var(--ring-color)}
+.ni.ac .nav-ico{background:rgba(255,255,255,.12);color:var(--surface);border-color:rgba(255,255,255,.18)}
 .ni .bd{margin-left:auto;background:var(--red);color:#fff;font-size:10px;padding:1px 6px;border-radius:10px;font-weight:600;display:none}
 .sb-ft{padding:12px 14px;border-top:1px solid rgba(232,230,220,.86);font-size:11px;color:var(--faint);text-align:center}
 
@@ -568,9 +766,9 @@ a{color:var(--accent)}
 .ph p{color:var(--muted);font-size:13px;margin-top:7px;text-wrap:pretty}
 
 /* CARDS */
-.sr{display:grid;grid-template-columns:repeat(auto-fill,minmax(184px,1fr));gap:14px;margin-bottom:22px}
-.sc{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:17px;display:flex;align-items:center;gap:13px;box-shadow:var(--shadow-card)}
-.si{width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;border:1px solid rgba(209,207,197,.48)}
+.sr{display:grid;grid-template-columns:repeat(auto-fit,minmax(176px,1fr));gap:12px;margin-bottom:22px}
+.sc{background:rgba(250,249,245,.78);border:1px solid var(--line);border-radius:14px;padding:14px;display:flex;align-items:center;gap:11px;box-shadow:var(--shadow-card);min-height:78px}
+.si{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;border:1px solid rgba(209,207,197,.48)}
 .si svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .si.bl{background:rgba(82,112,143,.13);color:var(--blue)}
 .si.gn{background:rgba(100,115,91,.13);color:var(--green)}
@@ -578,8 +776,8 @@ a{color:var(--accent)}
 .si.pk{background:rgba(168,95,120,.13);color:var(--pink)}
 .si.pp{background:rgba(117,99,168,.12);color:var(--purple)}
 .si.rd{background:rgba(181,51,51,.12);color:var(--red)}
-.sv{font-size:21px;font-weight:650;color:var(--fg);font-variant-numeric:tabular-nums;line-height:1.15}
-.sl{font-size:11px;color:var(--muted);margin-top:2px}
+.sv{font-size:17px;font-weight:650;color:var(--fg);font-variant-numeric:tabular-nums;line-height:1.2}
+.sl{font-size:11px;color:var(--muted);margin-top:3px}
 
 .pc,.chart-card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:20px;margin-bottom:16px;box-shadow:var(--shadow-card)}
 .pc h3,.chart-card h4{font-family:var(--font-serif);font-size:19px;font-weight:500;line-height:1.24;color:var(--fg);margin-bottom:14px;display:flex;align-items:center;gap:8px;text-wrap:balance}
@@ -1282,18 +1480,40 @@ scales:{x:{ticks:{color:'#87867f',font:{size:10},maxTicksLimit:8},grid:{color:'r
 }
 
 // ── DASH ──
+var _liveInfo={botRunning:false,botUptimeSeconds:0,botUptimeBase:0,panelUptime:'0h0m0s',costTotal:0};
+function fmtDuration(seconds){
+seconds=Math.max(0,parseInt(seconds||0,10));
+var d=Math.floor(seconds/86400),h=Math.floor(seconds%86400/3600),m=Math.floor(seconds%3600/60),s=seconds%60;
+return d?d+'d'+h+'h'+m+'m':h+'h'+m+'m'+s+'s';
+}
+function setLiveInfo(d){
+_liveInfo.botRunning=!!d.bot_running;
+_liveInfo.botUptimeSeconds=parseInt(d.bot_uptime_seconds||0,10)||0;
+_liveInfo.botUptimeBase=Date.now();
+_liveInfo.panelUptime=d.panel_uptime||d.uptime||'0h0m0s';
+_liveInfo.costTotal=Number(d.cost_total||0);
+updateLiveUptime();
+}
+function updateLiveUptime(){
+var extra=_liveInfo.botRunning?Math.floor((Date.now()-_liveInfo.botUptimeBase)/1000):0;
+var botText=_liveInfo.botRunning?fmtDuration(_liveInfo.botUptimeSeconds+extra):'已停止';
+var foot=document.getElementById('uptime');if(foot)foot.textContent=_liveInfo.botRunning?botText:_liveInfo.panelUptime;
+var dash=document.getElementById('dashUptime');if(dash)dash.textContent=botText;
+var cost=document.getElementById('dashCost');if(cost)cost.textContent='$'+_liveInfo.costTotal.toFixed(4);
+}
 async function rf_dash(){
 try{
 var d=await api('GET','/api/info');
+setLiveInfo(d);
 var h='';
 h+='<div class="sc"><div class="si bl">'+navIcon('agent')+'</div><div><div class="sv">'+(d.bot_running?'运行中':'已停止')+'</div><div class="sl">机器人状态</div></div></div>';
 h+='<div class="sc"><div class="si gn">'+navIcon('login')+'</div><div><div class="sv">'+(d.bili_logged_in?'已登录':'未登录')+'</div><div class="sl">B站认证</div></div></div>';
-h+='<div class="sc"><div class="si or">'+navIcon('conf')+'</div><div><div class="sv">'+(d.config_sections||0)+'</div><div class="sl">配置项</div></div></div>';
-h+='<div class="sc"><div class="si pk">'+navIcon('ctrl')+'</div><div><div class="sv" id="puptime">--</div><div class="sl">运行时长</div></div></div>';
-h+='<div class="sc"><div class="si pp">'+navIcon('sys')+'</div><div><div class="sv">'+(d.data_files||0)+'</div><div class="sl">数据文件</div></div></div>';
+h+='<div class="sc"><div class="si or">'+navIcon('sys')+'</div><div><div class="sv">'+(d.data_files||0)+'</div><div class="sl">数据文件</div></div></div>';
+h+='<div class="sc"><div class="si pk">'+navIcon('ctrl')+'</div><div><div class="sv" id="dashUptime">--</div><div class="sl">运行时长</div></div></div>';
+h+='<div class="sc"><div class="si pp">'+navIcon('conf')+'</div><div><div class="sv" id="dashCost">--</div><div class="sl">累计费用</div></div></div>';
 h+='<div class="sc" id="asrDashCard"><div class="si '+(d.asr_enabled?'gn':'rd')+'">'+navIcon('tutor')+'</div><div><div class="sv">'+(d.asr_enabled?'开启':'关闭')+'</div><div class="sl">ASR语音识别</div></div></div>';
 document.getElementById('dashStats').innerHTML=h;
-document.getElementById('puptime').textContent=d.uptime;
+updateLiveUptime();
 
 var dot=document.getElementById('botDot');dot.className='dot '+(d.bot_running?'on':'off');
 var bd='<table class="tb"><tr><th>项目</th><th>值</th><th>项目</th><th>值</th></tr>';
@@ -1351,6 +1571,7 @@ userScrolledUp=!atBottom;
 }
 async function upCtrlUI(){
 var d=await api('GET','/api/info');
+setLiveInfo(d);
 document.getElementById('ctrlStatus').innerHTML=d.bot_running?'<span class="tg tg-suc pulse">运行中</span> 自 '+d.bot_start_time:'<span class="tg tg-war">已停止</span>';
 document.getElementById('btnStart').style.display=d.bot_running?'none':'';
 document.getElementById('btnStop').style.display=d.bot_running?'':'none';
@@ -1812,13 +2033,15 @@ function emptyState(icon,text){return '<div class="emp"><div class="ic">'+navIco
 
 // ── AUTO REFRESH ──
 var autoTmr=null;
+var autoRefreshSkipPages={conf:1,psna:1,mood:1,behavior:1,tools:1,tutor:1,sys:1};
 function auto(){
 if(autoTmr)return;
 autoTmr=setInterval(async function(){
 var ap=document.querySelector('.page.on');if(!ap)return;
-var id=ap.id.replace('pg-','');if(window['rf_'+id])window['rf_'+id]();
-try{var d=await api('GET','/api/info');document.getElementById('uptime').textContent=d.uptime}catch(e){}
+var id=ap.id.replace('pg-','');if(!autoRefreshSkipPages[id]&&window['rf_'+id])window['rf_'+id]();
+try{var d=await api('GET','/api/info');setLiveInfo(d)}catch(e){}
 },8000);
+setInterval(updateLiveUptime,1000);
 }
 
 // ── MOOD ──
@@ -2168,7 +2391,7 @@ else{toast("请允许弹窗以预览HTML","err")}
 
 // ── INIT ──
 initNavIcons();rf_dash();auto();
-(async function(){try{var d=await api('GET','/api/info');document.getElementById('uptime').textContent=d.uptime}catch(e){}})();
+(async function(){try{var d=await api('GET','/api/info');setLiveInfo(d)}catch(e){}})();
 </script>
 </body>
 </html>'''
@@ -2188,6 +2411,7 @@ def api_info():
     mood = read_json(DATA_DIR / "mood_state.json") or read_json(DATA_DIR / "web_mood.json")
     persona = read_json(DATA_DIR / "web_personas.json") or read_json(DATA_DIR / "personas.json")
     costs = read_json(DATA_DIR / "web_costs.json")
+    bot_status = _bot_runtime_status()
     api_key = config.get('api', {}).get('unified_api_key', '') or os.getenv('BILI_AI_API_KEY', '')
     bili_token = os.getenv('BILI_REFRESH_TOKEN', '') or config.get('bilibili', {}).get('refresh_token', '')
 
@@ -2198,20 +2422,24 @@ def api_info():
         files[name] = file_stat(DATA_DIR / name)
 
     upt = datetime.now() - panel_start
-    us = f"{upt.days}d{upt.seconds//3600}h{(upt.seconds%3600)//60}m" if upt.days>0 else f"{upt.seconds//3600}h{(upt.seconds%3600)//60}m{upt.seconds%60}s"
+    panel_uptime = _format_duration(upt.total_seconds())
 
     comment_mode = config.get('behavior', {}).get('comment_mode', 'real')
     return jsonify(dict(
-        bot_running=bot_running,
-        bot_start_time=bot_start_time.strftime('%Y-%m-%d %H:%M:%S') if bot_start_time else None,
-        uptime=us,
+        bot_running=bot_status['running'],
+        bot_start_time=bot_status['start_text'],
+        bot_uptime=bot_status['uptime'],
+        bot_uptime_seconds=bot_status['uptime_seconds'],
+        bot_heartbeat_at=bot_status['heartbeat_at'],
+        panel_uptime=panel_uptime,
+        uptime=bot_status['uptime'] if bot_status['running'] else panel_uptime,
         api_configured=bool(api_key),
         bili_logged_in=bool(bili_token) or COOKIE_FILE.exists(),
         config_sections=len(config),
         data_files=sum(1 for f in files.values() if f['exists']),
         mood=dict(mood=mood.get('mood','?'), energy=mood.get('energy','?')) if mood else None,
         persona=dict(active=persona.get('active','')) if persona else None,
-        cost_total=costs.get('total',0) if costs else 0,
+        cost_total=_cost_total(costs),
         files=files,
         comment_mode=comment_mode,
         python_version=sys.version.split()[0],
@@ -2229,12 +2457,18 @@ def api_config():
         return jsonify(read_json(CONFIG_FILE))
     try:
         data = request.get_json(force=True)
+        if not isinstance(data, dict):
+            return jsonify(dict(ok=False, message='配置必须是 JSON 对象')), 400
+        current = read_json(CONFIG_FILE, {})
+        if not isinstance(current, dict):
+            current = {}
+        merged = _deep_merge_dict(current, data)
         if isinstance(data, dict):
-            site = data.get('site')
+            site = merged.get('site')
             if isinstance(site, dict):
                 site['logo_image'] = _sanitize_logo_image(site.get('logo_image') or '')
                 site['logo_svg'] = _sanitize_logo_svg(site.get('logo_svg') or '')
-        ok = write_json(CONFIG_FILE, data)
+        ok = write_json(CONFIG_FILE, merged)
         return jsonify(dict(ok=ok, message='配置已保存' if ok else '保存失败'))
     except Exception as e:
         return jsonify(dict(ok=False, message=str(e))), 400
@@ -2391,41 +2625,33 @@ def api_prompt_skill_delete(skill_id):
 def api_comments():
     limit = request.args.get('limit', 50, type=int)
     data = read_json(DATA_DIR / "comment_log.json", dict(items=[]))
-    items = data.get('items', [])
-    result = []
-    for it in items[-limit:]:
-        if isinstance(it, dict):
-            result.append(dict(
-                time=it.get('time', it.get('created_at', '')),
-                type=it.get('type', it.get('action', '')),
-                content=it.get('content', it.get('text', '')),
-                source=it.get('source', ''),
-                executed=it.get('executed', True),
-            ))
-    return jsonify(dict(items=result))
+    return jsonify(dict(items=_normalize_comments(data, limit)))
 
 # ── 用户画像 ──
 @app.route('/api/users')
 def api_users():
     data = read_json(DATA_DIR / "user_profiles.json", dict(users={}))
     wu = read_json(DATA_DIR / "web_user_profiles.json", dict(users={}))
-    users = {**data.get('users', {}), **wu.get('users', {})}
-    return jsonify(dict(users=users))
+    return jsonify(dict(users=_normalize_users(data, wu)))
 
 # ── 记忆 ──
 @app.route('/api/memory')
 def api_memory():
+    diary = _normalize_diary(read_json(DATA_DIR / "bot_diary.json", dict(entries=[])))
+    evolution = _normalize_evolution(read_json(DATA_DIR / "self_evolution.json", dict(events=[])))
     return jsonify(dict(
-        diary=read_json(DATA_DIR / "bot_diary.json", dict(entries=[])),
-        evolution=read_json(DATA_DIR / "self_evolution.json", dict(events=[])),
+        diary=diary,
+        evolution=evolution,
     ))
 
 # ── 日记进化 ──
 @app.route('/api/diary')
 def api_diary():
+    diary = _normalize_diary(read_json(DATA_DIR / "bot_diary.json", dict(entries=[])))
+    evolution = _normalize_evolution(read_json(DATA_DIR / "self_evolution.json", dict(events=[])))
     return jsonify(dict(
-        diary=read_json(DATA_DIR / "bot_diary.json", dict(entries=[])),
-        evolution=read_json(DATA_DIR / "self_evolution.json", dict(events=[])),
+        diary=diary,
+        evolution=evolution,
     ))
 
 # ── 操作日志 ──
@@ -2433,17 +2659,8 @@ def api_diary():
 def api_actions():
     limit = request.args.get('limit', 50, type=int)
     data = read_json(DATA_DIR / "web_action_log.json", dict(items=[]))
-    items = data.get('items', [])
-    result = []
-    for it in items[-limit:]:
-        if isinstance(it, dict):
-            result.append(dict(
-                time=it.get('created_at', it.get('time', '')),
-                action=it.get('action', ''),
-                payload=it.get('payload', {}),
-                executed=it.get('executed', False),
-            ))
-    return jsonify(dict(items=result))
+    agent_log = read_json(DATA_DIR / "agent_skill_log.json", [])
+    return jsonify(dict(items=_normalize_actions(data, agent_log, limit)))
 
 # ── 图表数据 ──
 @app.route('/api/charts')
@@ -2451,7 +2668,7 @@ def api_charts():
     """为仪表盘折线图提供历史统计数据"""
     days = request.args.get('days', 14, type=int)
     # 从 diary 数据提取心情/精力趋势
-    diary = read_json(DATA_DIR / "bot_diary.json", dict(entries=[]))
+    diary = _normalize_diary(read_json(DATA_DIR / "bot_diary.json", dict(entries=[])))
     entries = diary.get('entries', [])
     mood_data = []
     for e in entries[-days*5:]:  # 每天可能有多个条目
@@ -2459,8 +2676,8 @@ def api_charts():
         date = t[:10] if len(t) >= 10 else t  # YYYY-MM-DD
         mood_data.append(dict(
             date=date,
-            valence=e.get('mood_score', e.get('valence', 50)),
-            energy=int(e.get('energy', 50)),
+            valence=_num(e.get('mood_score', e.get('valence')), 50),
+            energy=_num(e.get('energy'), 50),
         ))
     # 按天聚合
     daily_moods = {}
@@ -2482,23 +2699,24 @@ def api_charts():
     # 从评论日志提取评论趋势
     cmt_log = read_json(DATA_DIR / "comment_log.json", dict(items=[]))
     daily_cmts = {}
-    for c in cmt_log.get('items', []):
-        t = c.get('time', c.get('created_at', ''))
+    for c in _normalize_comments(cmt_log, 1000):
+        t = c.get('time', '')
         date = t[:10] if len(t) >= 10 else t
         daily_cmts[date] = daily_cmts.get(date, 0) + 1
     cmt_result = [dict(date=d[5:] if len(d)==10 else d, count=c) for d, c in sorted(daily_cmts.items())[-days:]]
 
     # 从操作日志提取操作趋势
     act_log = read_json(DATA_DIR / "web_action_log.json", dict(items=[]))
+    agent_log = read_json(DATA_DIR / "agent_skill_log.json", [])
     daily_acts = {}
-    for a in act_log.get('items', []):
-        t = a.get('created_at', a.get('time', ''))
+    for a in _normalize_actions(act_log, agent_log, 1000):
+        t = a.get('time', '')
         date = t[:10] if len(t) >= 10 else t
         daily_acts[date] = daily_acts.get(date, 0) + 1
     act_result = [dict(date=d[5:] if len(d)==10 else d, count=c) for d, c in sorted(daily_acts.items())[-days:]]
 
     # 视频处理来自 evolution 事件
-    evo = read_json(DATA_DIR / "self_evolution.json", dict(events=[]))
+    evo = _normalize_evolution(read_json(DATA_DIR / "self_evolution.json", dict(events=[])))
     daily_vids = {}
     for ev in evo.get('events', []):
         t = ev.get('time', '')
@@ -2596,7 +2814,7 @@ def api_export():
     except Exception as e:
         return jsonify(dict(ok=False, message=str(e))), 500
 
-@app.route('/api/import', methods=['POST'])
+@app.route('/api/import', methods=['GET', 'POST'])
 def api_import():
     try:
         files = []

@@ -15,6 +15,7 @@ if "colorama" not in sys.modules:
         MAGENTA="",
     )
     colorama.Style = types.SimpleNamespace(RESET_ALL="")
+    colorama.init = lambda *args, **kwargs: None
     sys.modules["colorama"] = colorama
 
 from services.agent_service import AgentSkillRunner

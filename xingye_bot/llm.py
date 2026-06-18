@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from .settings import DATA_DIR, MODEL_PRICES, BotSettings
+from .settings import DATA_DIR, BotSettings, estimate_model_price
 from .state import BotState
 
 
@@ -82,7 +82,7 @@ class ModelClient:
         if not content:
             raise ModelError(f"模型返回空内容。model={model}")
 
-        self.state.record_cost(model, MODEL_PRICES.get(model, 0.0), purpose)
+        self.state.record_cost(model, estimate_model_price(model, purpose), purpose)
         return content
 
     async def test(self, model_role: str = "chat") -> dict[str, Any]:
@@ -111,7 +111,7 @@ class ModelClient:
             raise ModelError(f"图片生成失败：HTTP {resp.status_code} {resp.text[:300]}")
         data = resp.json()
         item = (data.get("data") or [{}])[0]
-        self.state.record_cost(model, MODEL_PRICES.get(model, 0.0), "image-generation")
+        self.state.record_cost(model, estimate_model_price(model, "image-generation"), "image-generation")
         if item.get("url"):
             return {"model": model, "url": item["url"], "path": ""}
         if item.get("b64_json"):
@@ -138,5 +138,5 @@ class ModelClient:
             vector = data["data"][0]["embedding"]
         except (KeyError, IndexError, TypeError) as exc:
             raise ModelError(f"Embedding 返回格式异常：{json.dumps(data, ensure_ascii=False)[:500]}") from exc
-        self.state.record_cost(model, MODEL_PRICES.get(model, 0.0), "embedding")
+        self.state.record_cost(model, estimate_model_price(model, "embedding"), "embedding")
         return [float(x) for x in vector]

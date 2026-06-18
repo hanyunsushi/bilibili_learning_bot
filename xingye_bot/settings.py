@@ -35,11 +35,36 @@ MODEL_ROLES = ("chat", "vision", "image", "fast", "embedding")
 
 
 MODEL_PRICES = {
-    "gpt-4.1-mini": 0.0,
-    "gpt-4.1-nano": 0.0,
-    "gpt-image-1": 0.0,
-    "text-embedding-3-small": 0.0,
+    "gpt-4.1-mini": 0.0008,
+    "gpt-4.1-nano": 0.0002,
+    "gpt-image-1": 0.04,
+    "text-embedding-3-small": 0.00002,
 }
+
+ROLE_PRICE_ESTIMATES = {
+    "chat": 0.0008,
+    "vision": 0.0012,
+    "fast": 0.0002,
+    "embedding": 0.00002,
+    "image": 0.04,
+}
+
+
+def estimate_model_price(model: str, purpose: str = "") -> float:
+    """Return a conservative per-call estimate when exact token accounting is unavailable."""
+    model_key = str(model or "")
+    if model_key in MODEL_PRICES:
+        return MODEL_PRICES[model_key]
+    purpose_key = str(purpose or "").lower()
+    if "embedding" in purpose_key:
+        return ROLE_PRICE_ESTIMATES["embedding"]
+    if "image" in purpose_key:
+        return ROLE_PRICE_ESTIMATES["image"]
+    if "vision" in purpose_key or "frame" in purpose_key:
+        return ROLE_PRICE_ESTIMATES["vision"]
+    if "fast" in purpose_key:
+        return ROLE_PRICE_ESTIMATES["fast"]
+    return ROLE_PRICE_ESTIMATES["chat"]
 
 
 def _public_provider(provider: dict[str, str]) -> dict[str, Any]:
@@ -190,7 +215,25 @@ def _env(name: str) -> str:
     return os.getenv(name, "").strip()
 
 
-def _role_provider_from_config(role: str, raw_providers: dict[str, Any], api_key: str, base_url: str, models: dict[str, str]) -> dict[str, str]:
+def _configured_model_for_role(role: str, api: dict[str, Any], raw_models: dict[str, Any]) -> str:
+    value = raw_models.get(role, "")
+    if value:
+        return str(value).strip()
+    if role in {"chat", "fast"} and api.get("model_brain"):
+        return str(api["model_brain"]).strip()
+    if role == "vision" and api.get("model_vision"):
+        return str(api["model_vision"]).strip()
+    return ""
+
+
+def _role_provider_from_config(
+    role: str,
+    raw_providers: dict[str, Any],
+    api_key: str,
+    base_url: str,
+    models: dict[str, str],
+    configured_models: dict[str, str],
+) -> dict[str, str]:
     provider = _dict(raw_providers.get(role))
     role_prefix = f"BILI_AI_{role.upper()}_"
     return {
@@ -198,6 +241,7 @@ def _role_provider_from_config(role: str, raw_providers: dict[str, Any], api_key
         "base_url": provider.get("base_url", "") or _env(role_prefix + "BASE_URL") or "",
         "model": (
             provider.get("model", "")
+            or configured_models.get(role, "")
             or _env(role_prefix + "MODEL")
             or _env(f"BILI_AI_MODEL_{role.upper()}")
             or models.get(role, "")
@@ -236,18 +280,19 @@ def load_settings() -> BotSettings:
     if video_mode not in {"subtitle", "frames", "hybrid", "smart"}:
         video_mode = "smart"
 
+    configured_models = {role: _configured_model_for_role(role, api, raw_models) for role in MODEL_ROLES}
     model_overrides = {
-        "chat": models.get("chat") or _env("BILI_AI_MODEL_CHAT") or DEFAULT_MODELS["chat"],
-        "vision": models.get("vision") or _env("BILI_AI_MODEL_VISION") or DEFAULT_MODELS["vision"],
-        "image": models.get("image") or _env("BILI_AI_MODEL_IMAGE") or DEFAULT_MODELS["image"],
-        "fast": models.get("fast") or _env("BILI_AI_MODEL_FAST") or DEFAULT_MODELS["fast"],
-        "embedding": models.get("embedding") or _env("BILI_AI_MODEL_EMBEDDING") or DEFAULT_MODELS["embedding"],
+        "chat": configured_models["chat"] or _env("BILI_AI_MODEL_CHAT") or DEFAULT_MODELS["chat"],
+        "vision": configured_models["vision"] or _env("BILI_AI_MODEL_VISION") or DEFAULT_MODELS["vision"],
+        "image": configured_models["image"] or _env("BILI_AI_MODEL_IMAGE") or DEFAULT_MODELS["image"],
+        "fast": configured_models["fast"] or _env("BILI_AI_MODEL_FAST") or DEFAULT_MODELS["fast"],
+        "embedding": configured_models["embedding"] or _env("BILI_AI_MODEL_EMBEDDING") or DEFAULT_MODELS["embedding"],
     }
     api_key = api.get("unified_api_key", "") or _env("BILI_AI_API_KEY")
     base_url = api.get("unified_base_url") or _env("BILI_AI_BASE_URL") or "https://api.openai.com/v1"
     raw_providers = _dict(raw.get("providers"))
     providers = {
-        role: _role_provider_from_config(role, raw_providers, api_key, base_url, model_overrides)
+        role: _role_provider_from_config(role, raw_providers, api_key, base_url, model_overrides, configured_models)
         for role in MODEL_ROLES
     }
 
