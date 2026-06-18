@@ -66,18 +66,47 @@ class AgentSkillRunner:
             })
         return normalized[:12]
 
+    def _prompt_skill_names(self, prompt_skills=None) -> list:
+        return [item.get("name", "") for item in prompt_skills or [] if item.get("name")]
+
+    def _format_prompt_skill_context(self, prompt_skills=None) -> str:
+        blocks = []
+        for index, item in enumerate(prompt_skills or [], 1):
+            name = item.get("name", f"Skill {index}")
+            scope = item.get("scope", "global")
+            persona = item.get("persona", "")
+            label = f"{name} / {scope}" + (f" / {persona}" if persona else "")
+            blocks.append(f"[Prompt Skill {index}: {label}]\n{item.get('content', '')}")
+        return "\n\n".join(blocks)[:20000]
+
+    def _apply_prompt_skill_to_query(self, goal: str, skill_context: str = "") -> str:
+        compact = re.sub(r"\s+", " ", skill_context or "").strip()
+        if not compact:
+            return goal
+        return f"{goal} 执行要求: {compact[:220]}"
+
+    def _step_with_prompt_skills(self, step: dict, skill_context: str, prompt_skills=None) -> dict:
+        if not skill_context:
+            return step
+        enriched = dict(step)
+        enriched["skill_context"] = skill_context
+        enriched["prompt_skill_names"] = self._prompt_skill_names(prompt_skills)
+        return enriched
+
     async def plan_and_execute(self, goal: str, skill: str = SKILL_FULL_PLAN, prompt_skills=None):
         """规划并执行一个目标（内部用，返回 raw dict）"""
         skill = self._normalize_skill(skill)
         prompt_skills = self._normalize_prompt_skills(prompt_skills)
+        skill_context = self._format_prompt_skill_context(prompt_skills)
         log(f"🤖 Agent开始规划: {goal} | skill={skill}", "INFO")
-        plan = self._make_plan(goal, skill=skill)
+        plan = self._make_plan(goal, skill=skill, prompt_skills=prompt_skills)
         if not plan:
-            return {"status": "no_plan", "goal": goal, "skill": skill, "prompt_skills": prompt_skills}
+            return {"status": "no_plan", "goal": goal, "skill": skill, "prompt_skills": prompt_skills, "skill_context": skill_context}
         log(f"📋 Agent计划: {json.dumps(plan, ensure_ascii=False)[:200]}", "CONFIG")
         result = await self._execute_plan(plan)
+        result["skill_context"] = skill_context
         self.goal_log.append({
-            "goal": goal, "skill": skill, "prompt_skills": prompt_skills, "plan": plan, "result": result,
+            "goal": goal, "skill": skill, "prompt_skills": prompt_skills, "skill_context": skill_context, "plan": plan, "result": result,
             "created_at": datetime.now().isoformat(),
             "time": datetime.now().isoformat(),
         })
@@ -88,9 +117,10 @@ class AgentSkillRunner:
         """[兼容接口] 执行一个Agent目标，返回 callers 期望的 {goal, results: [{step, result}, ...]} 格式"""
         skill = self._normalize_skill(skill)
         prompt_skills = self._normalize_prompt_skills(prompt_skills)
-        plan = self._make_plan(goal, skill=skill)
+        skill_context = self._format_prompt_skill_context(prompt_skills)
+        plan = self._make_plan(goal, skill=skill, prompt_skills=prompt_skills)
         if not plan:
-            return {"goal": goal, "skill": skill, "prompt_skills": prompt_skills, "results": [], "status": "no_plan"}
+            return {"goal": goal, "skill": skill, "prompt_skills": prompt_skills, "skill_context": skill_context, "results": [], "status": "no_plan"}
 
         log(f"📋 Agent计划: {json.dumps(plan, ensure_ascii=False)[:200]}", "CONFIG")
 
@@ -100,13 +130,22 @@ class AgentSkillRunner:
 
         for step in plan:
             action = step.get("action")
+            step_context = step.get("skill_context", skill_context)
+            prompt_skill_names = step.get("prompt_skill_names", self._prompt_skill_names(prompt_skills))
             step_info = {}
             step_result = {}
 
             if action == "search":
                 query = step.get("query", goal)
                 count = step.get("result_count", AGENT_MAX_SEARCH_RESULTS)
-                step_info = {"skill": "search_bilibili_videos", "query": query, "count": count, "prompt_skill_count": len(prompt_skills)}
+                step_info = {
+                    "skill": "search_bilibili_videos",
+                    "query": query,
+                    "count": count,
+                    "prompt_skill_count": len(prompt_skills),
+                    "prompt_skill_names": prompt_skill_names,
+                    "skill_context": step_context,
+                }
                 raw = await self._search_videos(query, count)
                 if isinstance(raw, list):
                     self._search_results = raw  # 缓存供 watch 步骤使用
@@ -116,20 +155,36 @@ class AgentSkillRunner:
 
             elif action == "watch":
                 max_v = step.get("max_videos", AGENT_MAX_VIDEOS_PER_PLAN)
-                step_info = {"skill": "watch_bilibili_videos", "max_videos": max_v, "prompt_skill_count": len(prompt_skills)}
-                raw = await self._watch_videos(max_v)
+                step_info = {
+                    "skill": "watch_bilibili_videos",
+                    "max_videos": max_v,
+                    "prompt_skill_count": len(prompt_skills),
+                    "prompt_skill_names": prompt_skill_names,
+                    "skill_context": step_context,
+                }
+                raw = await self._watch_videos(max_v, skill_context=step_context)
                 if raw.get("error"):
                     step_result = {"ok": False, "error": raw["error"], "watched": raw.get("videos", [])}
                 else:
                     step_result = {"ok": True, "watched": raw.get("videos", []), "count": raw.get("watched", 0)}
 
             elif action == "summarize":
-                step_info = {"skill": "write_memory", "prompt_skill_count": len(prompt_skills)}
-                raw = self._summarize()
+                step_info = {
+                    "skill": "write_memory",
+                    "prompt_skill_count": len(prompt_skills),
+                    "prompt_skill_names": prompt_skill_names,
+                    "skill_context": step_context,
+                }
+                raw = self._summarize(skill_context=step_context)
                 step_result = {"ok": True, "summary": raw.get("summary", "")}
 
             else:
-                step_info = {"skill": action, "prompt_skill_count": len(prompt_skills)}
+                step_info = {
+                    "skill": action,
+                    "prompt_skill_count": len(prompt_skills),
+                    "prompt_skill_names": prompt_skill_names,
+                    "skill_context": step_context,
+                }
                 step_result = {"ok": False, "error": f"未知动作: {action}"}
 
             results_list.append({"step": step_info, "result": step_result})
@@ -139,6 +194,7 @@ class AgentSkillRunner:
             "goal": goal,
             "skill": skill,
             "prompt_skills": prompt_skills,
+            "skill_context": skill_context,
             "plan": plan,
             "results": results_list,
             "created_at": datetime.now().isoformat(),
@@ -146,15 +202,24 @@ class AgentSkillRunner:
         })
         self._save_goal_log()
 
-        return {"goal": goal, "skill": skill, "prompt_skills": prompt_skills, "results": results_list, "status": "completed"}
+        return {"goal": goal, "skill": skill, "prompt_skills": prompt_skills, "skill_context": skill_context, "results": results_list, "status": "completed"}
 
-    def _make_plan(self, goal: str, skill: str = SKILL_FULL_PLAN) -> list:
+    def _make_plan(self, goal: str, skill: str = SKILL_FULL_PLAN, prompt_skills=None) -> list:
         cfg = _global_config.get("agent", {})
         max_steps = cfg.get("max_steps_per_plan", AGENT_MAX_STEPS_PER_PLAN)
         skill = self._normalize_skill(skill)
-        search_step = {"action": "search", "query": goal, "result_count": cfg.get("max_search_results", AGENT_MAX_SEARCH_RESULTS)}
-        watch_step = {"action": "watch", "max_videos": cfg.get("max_videos_per_plan", AGENT_MAX_VIDEOS_PER_PLAN)}
-        memory_step = {"action": "summarize"}
+        prompt_skills = self._normalize_prompt_skills(prompt_skills)
+        skill_context = self._format_prompt_skill_context(prompt_skills)
+        search_step = self._step_with_prompt_skills({
+            "action": "search",
+            "query": self._apply_prompt_skill_to_query(goal, skill_context),
+            "result_count": cfg.get("max_search_results", AGENT_MAX_SEARCH_RESULTS),
+        }, skill_context, prompt_skills)
+        watch_step = self._step_with_prompt_skills({
+            "action": "watch",
+            "max_videos": cfg.get("max_videos_per_plan", AGENT_MAX_VIDEOS_PER_PLAN),
+        }, skill_context, prompt_skills)
+        memory_step = self._step_with_prompt_skills({"action": "summarize"}, skill_context, prompt_skills)
         if skill == self.SKILL_SEARCH:
             plan = [search_step]
         elif skill == self.SKILL_WATCH:
@@ -179,9 +244,9 @@ class AgentSkillRunner:
                 results["search"] = raw
             elif action == "watch":
                 max_v = step.get("max_videos", 5)
-                results["watch"] = await self._watch_videos(max_v)
+                results["watch"] = await self._watch_videos(max_v, skill_context=step.get("skill_context", ""))
             elif action == "summarize":
-                results["summary"] = self._summarize()
+                results["summary"] = self._summarize(skill_context=step.get("skill_context", ""))
         return results
 
     async def _search_videos(self, query: str, count: int = 8):
@@ -196,7 +261,7 @@ class AgentSkillRunner:
         except Exception as e:
             return {"error": str(e)}
 
-    async def _watch_videos(self, max_videos: int):
+    async def _watch_videos(self, max_videos: int, skill_context: str = ""):
         if not self.brain:
             return {"error": "No brain"}
         watched = []
@@ -204,10 +269,12 @@ class AgentSkillRunner:
         for item in results[:max_videos]:
             bvid = item.get("bvid")
             if bvid:
-                watched.append({"bvid": bvid, "title": item.get("title", ""), "status": "watched"})
-        return {"watched": len(watched), "videos": watched}
+                watched.append({"bvid": bvid, "title": item.get("title", ""), "status": "watched", "skill_context": skill_context})
+        return {"watched": len(watched), "videos": watched, "skill_context": skill_context}
 
-    def _summarize(self):
+    def _summarize(self, skill_context: str = ""):
+        if skill_context:
+            return {"status": "completed", "summary": f"Agent任务执行完成。已应用 Prompt Skill:\n{skill_context}"}
         return {"status": "completed", "summary": "Agent任务执行完成"}
 
     def list_runs(self, limit: int = 10):

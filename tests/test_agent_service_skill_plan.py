@@ -55,6 +55,23 @@ class AgentServiceSkillPlanTest(unittest.TestCase):
         self.assertEqual(run["prompt_skills"][0]["name"], "全局学习风格")
         self.assertEqual(run["prompt_skills"][1]["persona"], "学习搭子")
         self.assertEqual(run["results"][0]["step"]["prompt_skill_count"], 2)
+        self.assertIn("用苏格拉底式追问。", run["skill_context"])
+        self.assertIn("口吻更温和。", run["results"][0]["step"]["skill_context"])
+        self.assertIn("用苏格拉底式追问。", run["results"][0]["result"]["summary"])
+
+    def test_prompt_skill_context_is_applied_to_search_plan(self):
+        runner = AgentSkillRunner()
+        plan = runner._make_plan(
+            "学习 Python 入门",
+            skill="search_bilibili_videos",
+            prompt_skills=[
+                {"name": "搜索约束", "scope": "global", "content": "只搜索长视频课程，排除广告。"},
+            ],
+        )
+
+        self.assertEqual(plan[0]["action"], "search")
+        self.assertIn("只搜索长视频课程，排除广告。", plan[0]["skill_context"])
+        self.assertIn("只搜索长视频课程", plan[0]["query"])
 
 
 if __name__ == "__main__":
