@@ -19,6 +19,7 @@ config.json
 # Runtime files
 bot_memory.json
 bot_journal.md
+knowledge_metadata.json
 upstream-bilibili-ai-bot.zip
 *.zip
 
@@ -50,6 +51,7 @@ _verify*.py
 learning_log.md
 bot_memory.json
 bot_journal.md
+knowledge_metadata.json
 
 # IDE / OS
 .idea/

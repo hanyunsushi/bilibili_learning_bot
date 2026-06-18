@@ -64,6 +64,10 @@ else:
     DATA_DIR = BASE_DIR / "Data"
 CONFIG_FILE = DATA_DIR / "config.json"
 COOKIE_FILE = DATA_DIR / "bilibili_cookies.json"
+MEMORY_FILE = DATA_DIR / "bot_memory.json"
+KB_METADATA_FILE = DATA_DIR / "knowledge_metadata.json"
+LEARNING_LOG_FILE = DATA_DIR / "learning_log.md"
+JOURNAL_FILE = DATA_DIR / "bot_journal.md"
 # 账号标识名（显示在网页标题等处）
 ACCOUNT_NAME = os.getenv('BILI_ACCOUNT_NAME', '').strip() or '默认'
 PROMPT_SKILLS_FILENAME = "web_prompt_skills.json"
@@ -71,6 +75,76 @@ PROMPT_SKILLS_FILENAME = "web_prompt_skills.json"
 app = Flask(__name__, static_folder=None)
 app.secret_key = os.urandom(24).hex()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+def _runtime_file_for_export_name(name: str) -> Path:
+    mapping = {
+        "bot_memory.json": MEMORY_FILE,
+        "knowledge_metadata.json": KB_METADATA_FILE,
+        "learning_log.md": LEARNING_LOG_FILE,
+        "bot_journal.md": JOURNAL_FILE,
+    }
+    return mapping.get(name, DATA_DIR / name)
+
+def _merge_runtime_json(current, legacy):
+    if isinstance(current, dict) and isinstance(legacy, dict):
+        merged = dict(current)
+        for key, legacy_value in legacy.items():
+            if key not in merged:
+                merged[key] = legacy_value
+                continue
+            current_value = merged[key]
+            if isinstance(current_value, dict) and isinstance(legacy_value, dict):
+                merged[key] = _merge_runtime_json(current_value, legacy_value)
+            elif isinstance(current_value, bool) and isinstance(legacy_value, bool):
+                merged[key] = current_value or legacy_value
+            elif isinstance(current_value, (int, float)) and isinstance(legacy_value, (int, float)):
+                if current_value == 0 and legacy_value > 0:
+                    merged[key] = legacy_value
+            elif current_value in (None, "", [], {}) and legacy_value not in (None, "", [], {}):
+                merged[key] = legacy_value
+        return merged
+    return current if current not in (None, "", [], {}) else legacy
+
+def _migrate_legacy_runtime_file(name: str, target: Path) -> bool:
+    legacy = BASE_DIR / name
+    if legacy.resolve() == target.resolve() or not legacy.exists():
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if target.exists():
+            if name.endswith(".json"):
+                merged = _merge_runtime_json(
+                    json.loads(target.read_text(encoding="utf-8")),
+                    json.loads(legacy.read_text(encoding="utf-8")),
+                )
+                target.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+                legacy.unlink()
+                return True
+            if name.endswith(".md"):
+                legacy_text = legacy.read_text(encoding="utf-8").strip()
+                if legacy_text:
+                    with target.open("a", encoding="utf-8") as f:
+                        f.write("\n\n---\n\n")
+                        f.write(legacy_text)
+                legacy.unlink()
+                return True
+            return False
+        legacy.replace(target)
+        return True
+    except Exception as e:
+        print(f"[WARN] 迁移旧运行文件失败 {name}: {e}", flush=True)
+        return False
+
+def migrate_legacy_runtime_files() -> None:
+    for name, target in {
+        "bot_memory.json": MEMORY_FILE,
+        "knowledge_metadata.json": KB_METADATA_FILE,
+        "learning_log.md": LEARNING_LOG_FILE,
+        "bot_journal.md": JOURNAL_FILE,
+    }.items():
+        _migrate_legacy_runtime_file(name, target)
+
+migrate_legacy_runtime_files()
 
 # ── 全局状态 ──
 bot_process: subprocess.Popen | None = None
@@ -2791,16 +2865,20 @@ def api_export():
                     export_data[fname] = json.loads(fp.read_text(encoding='utf-8'))
                 except Exception:
                     export_data[fname] = {}
-        # memory
-        memf = BASE_DIR / "bot_memory.json"
-        if memf.exists():
-            try: export_data['bot_memory.json'] = json.loads(memf.read_text(encoding='utf-8'))
-            except Exception: pass
-        # knowledge metadata
-        kmf = BASE_DIR / "knowledge_metadata.json"
-        if kmf.exists():
-            try: export_data['knowledge_metadata.json'] = json.loads(kmf.read_text(encoding='utf-8'))
-            except Exception: pass
+        for fname in ['bot_memory.json', 'knowledge_metadata.json']:
+            fp = _runtime_file_for_export_name(fname)
+            if fp.exists():
+                try:
+                    export_data[fname] = json.loads(fp.read_text(encoding='utf-8'))
+                except Exception:
+                    pass
+        for fname in ['learning_log.md', 'bot_journal.md']:
+            fp = _runtime_file_for_export_name(fname)
+            if fp.exists():
+                try:
+                    export_data[fname] = fp.read_text(encoding='utf-8')
+                except Exception:
+                    pass
 
         out = BACKUP_DIR_EXPORT / f"bilibili_learning_bot_export_{ts}.json"
         # 🔒 API Key 脱敏处理
@@ -2844,10 +2922,10 @@ def api_import_apply():
         data = json.loads(fpath.read_text(encoding='utf-8'))
         count = 0
         for key, val in data.items():
-            if key == 'bot_memory.json':
-                write_json(BASE_DIR / key, val)
-            elif key == 'knowledge_metadata.json':
-                write_json(BASE_DIR / key, val)
+            if key in {'bot_memory.json', 'knowledge_metadata.json'}:
+                write_json(_runtime_file_for_export_name(key), val)
+            elif key in {'learning_log.md', 'bot_journal.md'}:
+                _runtime_file_for_export_name(key).write_text(str(val), encoding='utf-8')
             else:
                 write_json(DATA_DIR / key, val)
             count += 1
@@ -2890,8 +2968,8 @@ def api_factory_reset():
             if fp.exists():
                 fp.unlink()
                 deleted.append(fname)
-        for fname in ['bot_memory.json', 'knowledge_metadata.json']:
-            fp = BASE_DIR / fname
+        for fname in ['bot_memory.json', 'knowledge_metadata.json', 'learning_log.md', 'bot_journal.md']:
+            fp = _runtime_file_for_export_name(fname)
             if fp.exists():
                 fp.unlink()
                 deleted.append(fname)
@@ -2913,7 +2991,8 @@ def api_factory_reset():
 # ── UP主关注列表 ──
 @app.route('/api/up-follow/list')
 def api_up_follow_list():
-    mem_file = BASE_DIR / "bot_memory.json"
+    migrate_legacy_runtime_files()
+    mem_file = MEMORY_FILE
     ups = {}
     followed = []
     if mem_file.exists():

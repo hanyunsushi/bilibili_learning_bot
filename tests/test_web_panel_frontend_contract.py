@@ -1,6 +1,7 @@
 import re
 import unittest
 import ast
+import json
 import tempfile
 import shutil
 import sys
@@ -426,6 +427,129 @@ class WebPanelFrontendContractTest(unittest.TestCase):
             self.assertAlmostEqual(info["cost_total"], 0.0012)
         finally:
             shutil.rmtree(data_dir, ignore_errors=True)
+
+    def test_up_follow_list_migrates_legacy_memory_into_data_dir(self):
+        import web_panel
+
+        base_dir = Path(tempfile.mkdtemp(prefix="bili-up-follow-migrate-test-"))
+        data_dir = base_dir / "Data"
+        config_file = data_dir / "config.json"
+        try:
+            data_dir.mkdir()
+            legacy_memory = base_dir / "bot_memory.json"
+            legacy_memory.write_text(json.dumps({
+                "known_ups": {
+                    "旧UP": {
+                        "uid": 123,
+                        "followed": True,
+                        "followed_at": "2026-06-18T08:00:00",
+                        "impressions": 2,
+                        "total_score": 17,
+                    }
+                }
+            }, ensure_ascii=False), encoding="utf-8")
+            with patch.object(web_panel, "BASE_DIR", base_dir), \
+                    patch.object(web_panel, "DATA_DIR", data_dir), \
+                    patch.object(web_panel, "CONFIG_FILE", config_file), \
+                    patch.object(web_panel, "MEMORY_FILE", data_dir / "bot_memory.json"), \
+                    patch.object(web_panel, "KB_METADATA_FILE", data_dir / "knowledge_metadata.json"), \
+                    patch.object(web_panel, "LEARNING_LOG_FILE", data_dir / "learning_log.md"), \
+                    patch.object(web_panel, "JOURNAL_FILE", data_dir / "bot_journal.md"):
+                web_panel.app.config.update(TESTING=True)
+                web_panel.write_json(config_file, {"web": {"username": "alice", "password": "secret"}})
+                with web_panel.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["disclaimer_agreed"] = True
+                        session["panel_authenticated"] = True
+                    response = client.get("/api/up-follow/list")
+
+            payload = response.get_json()
+            self.assertEqual(payload["total"], 1)
+            self.assertEqual(payload["items"][0]["name"], "旧UP")
+            self.assertTrue((data_dir / "bot_memory.json").exists())
+            self.assertFalse(legacy_memory.exists())
+        finally:
+            shutil.rmtree(base_dir, ignore_errors=True)
+
+    def test_import_writes_runtime_files_to_data_dir(self):
+        import web_panel
+
+        base_dir = Path(tempfile.mkdtemp(prefix="bili-import-runtime-test-"))
+        data_dir = base_dir / "Data"
+        backup_dir = base_dir / "backups"
+        config_file = data_dir / "config.json"
+        try:
+            data_dir.mkdir()
+            backup_dir.mkdir()
+            backup = backup_dir / "backup.json"
+            backup.write_text(json.dumps({
+                "bot_memory.json": {"known_ups": {"导入UP": {"followed": True}}},
+                "knowledge_metadata.json": {"file_index": {}},
+                "learning_log.md": "学习记录",
+                "bot_journal.md": "Bot日志",
+            }, ensure_ascii=False), encoding="utf-8")
+            with patch.object(web_panel, "BASE_DIR", base_dir), \
+                    patch.object(web_panel, "DATA_DIR", data_dir), \
+                    patch.object(web_panel, "CONFIG_FILE", config_file), \
+                    patch.object(web_panel, "MEMORY_FILE", data_dir / "bot_memory.json"), \
+                    patch.object(web_panel, "KB_METADATA_FILE", data_dir / "knowledge_metadata.json"), \
+                    patch.object(web_panel, "LEARNING_LOG_FILE", data_dir / "learning_log.md"), \
+                    patch.object(web_panel, "JOURNAL_FILE", data_dir / "bot_journal.md"), \
+                    patch.object(web_panel, "BACKUP_DIR_EXPORT", backup_dir):
+                web_panel.app.config.update(TESTING=True)
+                web_panel.write_json(config_file, {"web": {"username": "alice", "password": "secret"}})
+                with web_panel.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["disclaimer_agreed"] = True
+                        session["panel_authenticated"] = True
+                    response = client.post("/api/import/apply", json={"filename": backup.name})
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue((data_dir / "bot_memory.json").exists())
+            self.assertTrue((data_dir / "knowledge_metadata.json").exists())
+            self.assertEqual((data_dir / "learning_log.md").read_text(encoding="utf-8"), "学习记录")
+            self.assertEqual((data_dir / "bot_journal.md").read_text(encoding="utf-8"), "Bot日志")
+            self.assertFalse((base_dir / "bot_memory.json").exists())
+            self.assertFalse((base_dir / "knowledge_metadata.json").exists())
+        finally:
+            shutil.rmtree(base_dir, ignore_errors=True)
+
+    def test_migration_merges_legacy_runtime_json_when_data_file_exists(self):
+        import web_panel
+
+        base_dir = Path(tempfile.mkdtemp(prefix="bili-runtime-merge-test-"))
+        data_dir = base_dir / "Data"
+        try:
+            data_dir.mkdir()
+            legacy_memory = base_dir / "bot_memory.json"
+            target_memory = data_dir / "bot_memory.json"
+            legacy_memory.write_text(json.dumps({
+                "known_ups": {
+                    "旧UP": {"uid": 123, "followed": True},
+                    "同名UP": {"uid": 456, "followed": True, "views": 3, "total_score": 21},
+                }
+            }, ensure_ascii=False), encoding="utf-8")
+            target_memory.write_text(json.dumps({
+                "known_ups": {
+                    "新UP": {"uid": 789, "followed": True},
+                    "同名UP": {"uid": None, "followed": False, "views": 0, "total_score": 0},
+                }
+            }, ensure_ascii=False), encoding="utf-8")
+
+            with patch.object(web_panel, "BASE_DIR", base_dir):
+                migrated = web_panel._migrate_legacy_runtime_file("bot_memory.json", target_memory)
+
+            merged = json.loads(target_memory.read_text(encoding="utf-8"))
+            self.assertTrue(migrated)
+            self.assertFalse(legacy_memory.exists())
+            self.assertIn("旧UP", merged["known_ups"])
+            self.assertIn("新UP", merged["known_ups"])
+            self.assertTrue(merged["known_ups"]["同名UP"]["followed"])
+            self.assertEqual(merged["known_ups"]["同名UP"]["uid"], 456)
+            self.assertEqual(merged["known_ups"]["同名UP"]["views"], 3)
+            self.assertEqual(merged["known_ups"]["同名UP"]["total_score"], 21)
+        finally:
+            shutil.rmtree(base_dir, ignore_errors=True)
 
     def test_config_api_merges_partial_updates_and_sanitizes_logo(self):
         import web_panel

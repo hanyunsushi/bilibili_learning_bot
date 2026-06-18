@@ -1,6 +1,7 @@
 import shutil
 import os
 import sys
+import json
 import tempfile
 import types
 import unittest
@@ -85,6 +86,68 @@ class LearningArchiveFallbackTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(category, "足球战术分析")
         classifier._find_best_category.assert_not_called()
+
+    def test_durable_runtime_files_live_under_data_dir(self):
+        data_dir = Path(new_agent.DATA_DIR)
+        expected = {
+            "MEMORY_FILE": data_dir / "bot_memory.json",
+            "KB_METADATA_FILE": data_dir / "knowledge_metadata.json",
+            "LEARNING_LOG_FILE": data_dir / "learning_log.md",
+            "JOURNAL_FILE": data_dir / "bot_journal.md",
+        }
+
+        for attr, expected_path in expected.items():
+            self.assertEqual(Path(getattr(new_agent, attr)), expected_path)
+
+    def test_legacy_runtime_files_are_migrated_to_data_dir(self):
+        base_dir = self.tmp / "app"
+        data_dir = base_dir / "Data"
+        base_dir.mkdir()
+        data_dir.mkdir()
+        legacy_memory = base_dir / "bot_memory.json"
+        target_memory = data_dir / "bot_memory.json"
+        legacy_memory.write_text('{"known_ups":{"旧UP":{"followed":true}}}', encoding="utf-8")
+
+        with patch.object(new_agent, "BASE_DIR", str(base_dir)), \
+             patch.object(new_agent, "DATA_DIR", str(data_dir)), \
+             patch.object(new_agent, "MEMORY_FILE", str(target_memory)):
+            migrated = new_agent._migrate_legacy_runtime_file("bot_memory.json", str(target_memory))
+
+        self.assertTrue(migrated)
+        self.assertTrue(target_memory.exists())
+        self.assertFalse(legacy_memory.exists())
+        self.assertIn("旧UP", target_memory.read_text(encoding="utf-8"))
+
+    def test_legacy_memory_merges_when_data_file_already_exists(self):
+        base_dir = self.tmp / "app"
+        data_dir = base_dir / "Data"
+        base_dir.mkdir()
+        data_dir.mkdir()
+        legacy_memory = base_dir / "bot_memory.json"
+        target_memory = data_dir / "bot_memory.json"
+        legacy_memory.write_text(
+            '{"known_ups":{"旧UP":{"uid":123,"followed":true},"同名UP":{"uid":456,"followed":true,"views":3,"total_score":21}}}',
+            encoding="utf-8",
+        )
+        target_memory.write_text(
+            '{"known_ups":{"新UP":{"uid":789,"followed":true},"同名UP":{"uid":null,"followed":false,"views":0,"total_score":0}}}',
+            encoding="utf-8",
+        )
+
+        with patch.object(new_agent, "BASE_DIR", str(base_dir)), \
+             patch.object(new_agent, "DATA_DIR", str(data_dir)), \
+             patch.object(new_agent, "MEMORY_FILE", str(target_memory)):
+            migrated = new_agent._migrate_legacy_runtime_file("bot_memory.json", str(target_memory))
+
+        merged = json.loads(target_memory.read_text(encoding="utf-8"))
+        self.assertTrue(migrated)
+        self.assertFalse(legacy_memory.exists())
+        self.assertIn("旧UP", merged["known_ups"])
+        self.assertIn("新UP", merged["known_ups"])
+        self.assertTrue(merged["known_ups"]["同名UP"]["followed"])
+        self.assertEqual(merged["known_ups"]["同名UP"]["uid"], 456)
+        self.assertEqual(merged["known_ups"]["同名UP"]["views"], 3)
+        self.assertEqual(merged["known_ups"]["同名UP"]["total_score"], 21)
 
     async def test_knowledge_verify_uses_model_client_before_legacy_openai(self):
         class FakeModelClient:

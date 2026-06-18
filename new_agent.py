@@ -875,13 +875,84 @@ def _bili_trigger_cooldown():
         log(f"🔒 -799 限流命中！全局冷却 {duration:.0f}s，期间暂停所有B站API调用", "COOL")
 
 # --- 路径配置 ---
-JOURNAL_FILE = os.path.join(BASE_DIR, "bot_journal.md")
-MEMORY_FILE = os.path.join(BASE_DIR, "bot_memory.json")
+JOURNAL_FILE = os.path.join(DATA_DIR, "bot_journal.md")
+MEMORY_FILE = os.path.join(DATA_DIR, "bot_memory.json")
 HISTORY_VIDEOS_FILE = os.path.join(DATA_DIR, "history_videos.json")  # 互动过的视频（点赞/收藏），用于回顾复习
 KNOWLEDGE_BASE_DIR = os.path.join(BASE_DIR, "KnowledgeBase")
 DRY_GOODS_DIR = os.path.join(BASE_DIR, "highlights")
-LEARNING_LOG_FILE = os.path.join(BASE_DIR, "learning_log.md")
-KB_METADATA_FILE = os.path.join(BASE_DIR, "knowledge_metadata.json")
+LEARNING_LOG_FILE = os.path.join(DATA_DIR, "learning_log.md")
+KB_METADATA_FILE = os.path.join(DATA_DIR, "knowledge_metadata.json")
+
+
+def _merge_runtime_json(current, legacy):
+    if isinstance(current, dict) and isinstance(legacy, dict):
+        merged = dict(current)
+        for key, legacy_value in legacy.items():
+            if key not in merged:
+                merged[key] = legacy_value
+                continue
+            current_value = merged[key]
+            if isinstance(current_value, dict) and isinstance(legacy_value, dict):
+                merged[key] = _merge_runtime_json(current_value, legacy_value)
+            elif isinstance(current_value, bool) and isinstance(legacy_value, bool):
+                merged[key] = current_value or legacy_value
+            elif isinstance(current_value, (int, float)) and isinstance(legacy_value, (int, float)):
+                if current_value == 0 and legacy_value > 0:
+                    merged[key] = legacy_value
+            elif current_value in (None, "", [], {}) and legacy_value not in (None, "", [], {}):
+                merged[key] = legacy_value
+        return merged
+    return current if current not in (None, "", [], {}) else legacy
+
+
+def _migrate_legacy_runtime_file(filename: str, target_path: str) -> bool:
+    """Move old root-level runtime files into Data so Docker rebuilds keep them."""
+    legacy_path = os.path.join(BASE_DIR, filename)
+    if os.path.abspath(legacy_path) == os.path.abspath(target_path):
+        return False
+    if not os.path.exists(legacy_path):
+        return False
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    try:
+        if os.path.exists(target_path):
+            if filename.endswith(".json"):
+                with open(target_path, "r", encoding="utf-8") as f:
+                    current_data = json.load(f)
+                with open(legacy_path, "r", encoding="utf-8") as f:
+                    legacy_data = json.load(f)
+                merged = _merge_runtime_json(current_data, legacy_data)
+                with open(target_path, "w", encoding="utf-8") as f:
+                    json.dump(merged, f, ensure_ascii=False, indent=2)
+                os.remove(legacy_path)
+                return True
+            if filename.endswith(".md"):
+                with open(legacy_path, "r", encoding="utf-8") as f:
+                    legacy_text = f.read().strip()
+                if legacy_text:
+                    with open(target_path, "a", encoding="utf-8") as f:
+                        f.write("\n\n---\n\n")
+                        f.write(legacy_text)
+                os.remove(legacy_path)
+                return True
+            return False
+        shutil.move(legacy_path, target_path)
+        return True
+    except Exception as e:
+        print(f"[WARN] 迁移旧运行文件失败 {filename}: {e}")
+        return False
+
+
+def _migrate_legacy_runtime_files():
+    for filename, target in (
+        ("bot_journal.md", JOURNAL_FILE),
+        ("bot_memory.json", MEMORY_FILE),
+        ("learning_log.md", LEARNING_LOG_FILE),
+        ("knowledge_metadata.json", KB_METADATA_FILE),
+    ):
+        _migrate_legacy_runtime_file(filename, target)
+
+
+_migrate_legacy_runtime_files()
 
 
 # ==============================================================================
@@ -3747,7 +3818,7 @@ def show_up_danmaku_menu():
 
 def _show_followed_ups():
     """从 bot_memory.json 读取并显示 AI 已关注的UP主列表。"""
-    mem_file = os.path.join(BASE_DIR, "bot_memory.json")
+    mem_file = MEMORY_FILE
     if not os.path.exists(mem_file):
         print(f"{Fore.YELLOW}[WARN]  暂无关注记录（bot_memory.json 不存在）{Style.RESET_ALL}")
         return
@@ -4876,7 +4947,7 @@ def export_config():
                 print(f"  {Fore.YELLOW}⚠{Style.RESET_ALL} 读取失败 {os.path.basename(path)}: {e}")
 
     # 知识库元数据
-    kb_metadata_file = os.path.join(BASE_DIR, "knowledge_metadata.json")
+    kb_metadata_file = KB_METADATA_FILE
     if os.path.exists(kb_metadata_file):
         try:
             with open(kb_metadata_file, "r", encoding="utf-8") as f:
@@ -5056,7 +5127,7 @@ def import_config():
                 print(f"  {Fore.RED}✗{Style.RESET_ALL} 恢复失败 {os.path.basename(path)}: {e}")
 
     # 知识库元数据
-    kb_metadata_file = os.path.join(BASE_DIR, "knowledge_metadata.json")
+    kb_metadata_file = KB_METADATA_FILE
     kb_data = import_data.get("knowledge_metadata")
     if kb_data is not None:
         try:
@@ -14217,7 +14288,7 @@ CUSTOM_KNOWLEDGE_DIR = os.path.join(KNOWLEDGE_BASE_DIR, "自定义知识")
 def _init_custom_knowledge_dir():
     """确保自定义知识目录存在，并初始化 metadata 中的索引"""
     os.makedirs(CUSTOM_KNOWLEDGE_DIR, exist_ok=True)
-    meta_path = os.path.join(BASE_DIR, "knowledge_metadata.json")
+    meta_path = KB_METADATA_FILE
     if os.path.exists(meta_path):
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
@@ -14451,7 +14522,7 @@ async def _ai_search_bilibili_and_add():
                 f.write(full_content)
             
             # 更新metadata
-            meta_path = os.path.join(BASE_DIR, "knowledge_metadata.json")
+            meta_path = KB_METADATA_FILE
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
             meta.setdefault("file_index", {}).setdefault("自定义知识", [])
@@ -14529,7 +14600,7 @@ async def _ai_search_bilibili_and_add():
             f.write(combined_content)
         
         # 更新metadata
-        meta_path = os.path.join(BASE_DIR, "knowledge_metadata.json")
+        meta_path = KB_METADATA_FILE
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
         meta.setdefault("file_index", {}).setdefault("自定义知识", [])
@@ -14624,7 +14695,7 @@ async def _add_custom_knowledge():
         f.write(full_content)
     
     # 更新 metadata
-    meta_path = os.path.join(BASE_DIR, "knowledge_metadata.json")
+    meta_path = KB_METADATA_FILE
     with open(meta_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
     meta.setdefault("file_index", {}).setdefault("自定义知识", [])
@@ -14829,7 +14900,7 @@ async def _edit_custom_knowledge(entries):
         os.remove(fpath)
     
     # 更新 metadata
-    meta_path = os.path.join(BASE_DIR, "knowledge_metadata.json")
+    meta_path = KB_METADATA_FILE
     with open(meta_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
     for e in meta.setdefault("file_index", {}).setdefault("自定义知识", []):
@@ -14880,7 +14951,7 @@ async def _delete_custom_knowledge(entries):
         print(f"{Fore.GREEN}[OK] 文件已删除{Style.RESET_ALL}")
     
     # 更新 metadata
-    meta_path = os.path.join(BASE_DIR, "knowledge_metadata.json")
+    meta_path = KB_METADATA_FILE
     with open(meta_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
     meta.setdefault("file_index", {}).setdefault("自定义知识", [])
