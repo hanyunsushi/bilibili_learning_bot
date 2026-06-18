@@ -471,6 +471,79 @@ class WebPanelFrontendContractTest(unittest.TestCase):
         finally:
             shutil.rmtree(base_dir, ignore_errors=True)
 
+    def test_up_follow_list_syncs_bilibili_followings_when_local_memory_empty(self):
+        import web_panel
+
+        base_dir = Path(tempfile.mkdtemp(prefix="bili-up-follow-sync-test-"))
+        data_dir = base_dir / "Data"
+        config_file = data_dir / "config.json"
+        memory_file = data_dir / "bot_memory.json"
+        try:
+            data_dir.mkdir()
+            with patch.object(web_panel, "BASE_DIR", base_dir), \
+                    patch.object(web_panel, "DATA_DIR", data_dir), \
+                    patch.object(web_panel, "CONFIG_FILE", config_file), \
+                    patch.object(web_panel, "MEMORY_FILE", memory_file), \
+                    patch.object(web_panel, "_fetch_bilibili_followings", return_value=[
+                        {"mid": 1001, "name": "同步UP", "sign": "讲技术"},
+                    ], create=True):
+                web_panel.app.config.update(TESTING=True)
+                web_panel.write_json(config_file, {"web": {"username": "alice", "password": "secret"}})
+                with web_panel.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["disclaimer_agreed"] = True
+                        session["panel_authenticated"] = True
+                    response = client.get("/api/up-follow/list")
+
+            payload = response.get_json()
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(payload["total"], 1)
+            self.assertEqual(payload["source"], "bilibili_followings")
+            self.assertEqual(payload["items"][0]["name"], "同步UP")
+            self.assertEqual(payload["items"][0]["uid"], 1001)
+            saved = json.loads(memory_file.read_text(encoding="utf-8"))
+            self.assertTrue(saved["known_ups"]["同步UP"]["followed"])
+            self.assertEqual(saved["known_ups"]["同步UP"]["source"], "bilibili_followings")
+        finally:
+            shutil.rmtree(base_dir, ignore_errors=True)
+
+    def test_behavior_safety_routes_persist_reply_safety_config(self):
+        import web_panel
+
+        data_dir = Path(tempfile.mkdtemp(prefix="bili-safety-route-test-"))
+        config_file = data_dir / "config.json"
+        try:
+            with patch.object(web_panel, "DATA_DIR", data_dir), patch.object(web_panel, "CONFIG_FILE", config_file):
+                web_panel.app.config.update(TESTING=True)
+                web_panel.write_json(config_file, {
+                    "web": {"username": "alice", "password": "secret"},
+                    "reply_safety": {
+                        "enabled": True,
+                        "blocked_keywords": ["旧词"],
+                        "block_on_incoming": True,
+                        "block_on_outgoing": True,
+                    },
+                })
+                with web_panel.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["disclaimer_agreed"] = True
+                        session["panel_authenticated"] = True
+                    current = client.get("/api/behavior/safety")
+                    toggle = client.post("/api/behavior/safety/toggle", json={"enabled": False})
+                    save = client.post("/api/behavior/safety/save", json={"keywords": ["新词", "旧词", "新词", ""]})
+                saved = web_panel.read_json(config_file, {})
+
+            self.assertEqual(current.status_code, 200)
+            self.assertEqual(current.get_json()["keywords"], ["旧词"])
+            self.assertTrue(current.get_json()["enabled"])
+            self.assertEqual(toggle.status_code, 200)
+            self.assertFalse(toggle.get_json()["enabled"])
+            self.assertEqual(save.status_code, 200)
+            self.assertFalse(saved["reply_safety"]["enabled"])
+            self.assertEqual(saved["reply_safety"]["blocked_keywords"], ["新词", "旧词"])
+        finally:
+            shutil.rmtree(data_dir, ignore_errors=True)
+
     def test_import_writes_runtime_files_to_data_dir(self):
         import web_panel
 

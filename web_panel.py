@@ -176,6 +176,132 @@ def write_json(path: Path, data):
     """线程安全写入 JSON（原子写临时文件再 rename）。"""
     return JsonStore(path).write(data)
 
+def _format_followed_up_item(name: str, info: dict) -> dict:
+    impressions = info.get('impressions', info.get('views', 0)) or 0
+    total_score = info.get('total_score', 0) or 0
+    return dict(
+        name=name,
+        uid=info.get('uid', ''),
+        followed_at=info.get('followed_at', ''),
+        impressions=impressions,
+        avg_score=round(total_score / max(impressions, 1), 1),
+        favorited=info.get('favorited', False),
+    )
+
+def _followed_ups_from_memory() -> list:
+    followed = []
+    mem = read_json(MEMORY_FILE, {})
+    ups = mem.get('known_ups', {}) if isinstance(mem, dict) else {}
+    if not isinstance(ups, dict):
+        return followed
+    for name, info in ups.items():
+        if isinstance(info, dict) and info.get('followed'):
+            followed.append(_format_followed_up_item(name, info))
+    return followed
+
+async def _fetch_bilibili_followings_async(limit: int = 100) -> list:
+    cookies = read_json(COOKIE_FILE, {})
+    if not isinstance(cookies, dict):
+        return []
+    uid = str(cookies.get('DedeUserID') or '').strip()
+    if not uid or not str(cookies.get('SESSDATA') or '').strip():
+        return []
+    from bilibili_api import Credential
+    from services.utils import BiliToolbox
+    credential = Credential(
+        sessdata=cookies.get('SESSDATA'),
+        bili_jct=cookies.get('bili_jct'),
+        buvid3=cookies.get('buvid3'),
+        buvid4=cookies.get('buvid4'),
+        dedeuserid=uid,
+        ac_time_value=cookies.get('ac_time_value'),
+    )
+    result = await BiliToolbox(credential, uid).followings_search("", limit=limit)
+    return result if isinstance(result, list) else []
+
+def _fetch_bilibili_followings(limit: int = 100) -> list:
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(_fetch_bilibili_followings_async(limit=limit))
+    except Exception as e:
+        log_line(f"同步B站关注列表失败: {e}")
+        return []
+    finally:
+        loop.close()
+
+def _sync_bilibili_followings_to_memory(items: list) -> list:
+    if not isinstance(items, list) or not items:
+        return []
+    mem = read_json(MEMORY_FILE, {})
+    if not isinstance(mem, dict):
+        mem = {}
+    known_ups = mem.setdefault('known_ups', {})
+    if not isinstance(known_ups, dict):
+        known_ups = {}
+        mem['known_ups'] = known_ups
+    now = datetime.now().isoformat()
+    changed = False
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get('name') or item.get('uname') or item.get('nickname') or '').strip()
+        if not name:
+            continue
+        uid = item.get('mid') or item.get('uid') or item.get('uid_str') or ''
+        entry = known_ups.get(name) if isinstance(known_ups.get(name), dict) else {}
+        entry.setdefault('followed_at', now)
+        entry.setdefault('impressions', entry.get('views', 0) or 0)
+        entry.setdefault('total_score', 0)
+        entry['uid'] = uid or entry.get('uid', '')
+        entry['followed'] = True
+        entry['favorited'] = True
+        entry['source'] = 'bilibili_followings'
+        entry['last_sync_at'] = now
+        if item.get('sign'):
+            entry['sign'] = str(item.get('sign'))[:120]
+        known_ups[name] = entry
+        changed = True
+    if changed:
+        write_json(MEMORY_FILE, mem)
+    return _followed_ups_from_memory()
+
+def _reply_safety_config(config: dict) -> dict:
+    if not isinstance(config, dict):
+        config = {}
+    safety = config.get('reply_safety')
+    if not isinstance(safety, dict):
+        safety = {}
+        config['reply_safety'] = safety
+    defaults = {
+        'enabled': True,
+        'blocked_keywords': [],
+        'block_on_incoming': True,
+        'block_on_outgoing': True,
+        'block_political_video_comments': True,
+    }
+    for key, value in defaults.items():
+        safety.setdefault(key, value)
+    if not isinstance(safety.get('blocked_keywords'), list):
+        safety['blocked_keywords'] = []
+    return safety
+
+def _sanitize_safety_keywords(raw_keywords) -> list:
+    if isinstance(raw_keywords, str):
+        raw_keywords = re.split(r'[\n,]', raw_keywords)
+    if not isinstance(raw_keywords, list):
+        raw_keywords = []
+    seen = set()
+    keywords = []
+    for item in raw_keywords:
+        keyword = str(item or '').replace('\x00', '').strip()
+        if not keyword or keyword in seen:
+            continue
+        seen.add(keyword)
+        keywords.append(keyword[:80])
+        if len(keywords) >= 300:
+            break
+    return keywords
+
 def _prompt_skills_file() -> Path:
     return DATA_DIR / PROMPT_SKILLS_FILENAME
 
@@ -2992,26 +3118,14 @@ def api_factory_reset():
 @app.route('/api/up-follow/list')
 def api_up_follow_list():
     migrate_legacy_runtime_files()
-    mem_file = MEMORY_FILE
-    ups = {}
-    followed = []
-    if mem_file.exists():
-        try:
-            mem = json.loads(mem_file.read_text(encoding='utf-8'))
-            ups = mem.get('known_ups', {})
-            for name, info in ups.items():
-                if isinstance(info, dict) and info.get('followed'):
-                    followed.append(dict(
-                        name=name,
-                        uid=info.get('uid', ''),
-                        followed_at=info.get('followed_at', ''),
-                        impressions=info.get('impressions', 0),
-                        avg_score=round(info.get('total_score', 0) / max(info.get('impressions', 1), 1), 1),
-                        favorited=info.get('favorited', False)
-                    ))
-        except Exception:
-            pass
-    return jsonify(dict(total=len(followed), items=followed))
+    followed = _followed_ups_from_memory()
+    source = 'memory'
+    if not followed and request.args.get('sync', '1') != '0':
+        synced_items = _fetch_bilibili_followings(limit=100)
+        if synced_items:
+            followed = _sync_bilibili_followings_to_memory(synced_items)
+            source = 'bilibili_followings'
+    return jsonify(dict(total=len(followed), items=followed, source=source))
 
 # ── 知识库统计 ──
 @app.route('/api/kb/stats')
@@ -3371,6 +3485,53 @@ def api_behavior_ai_marker_toggle():
         msg = 'AI免责声明已开启' if enabled else 'AI免责声明已关闭'
         log_line(msg)
         return jsonify(dict(ok=True, message=msg, marker=behavior['ai_marker']))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+@app.route('/api/behavior/safety')
+def api_behavior_safety():
+    config = read_json(CONFIG_FILE, {})
+    safety = _reply_safety_config(config)
+    return jsonify(dict(
+        ok=True,
+        enabled=bool(safety.get('enabled', True)),
+        keywords=_sanitize_safety_keywords(safety.get('blocked_keywords', [])),
+        block_on_incoming=bool(safety.get('block_on_incoming', True)),
+        block_on_outgoing=bool(safety.get('block_on_outgoing', True)),
+        block_political_video_comments=bool(safety.get('block_political_video_comments', True)),
+    ))
+
+@app.route('/api/behavior/safety/toggle', methods=['POST'])
+def api_behavior_safety_toggle():
+    try:
+        body = request.get_json(force=True)
+        enabled = bool(body.get('enabled', True))
+        config = read_json(CONFIG_FILE, {})
+        safety = _reply_safety_config(config)
+        safety['enabled'] = enabled
+        write_json(CONFIG_FILE, config)
+        msg = '关键词安全校验已开启' if enabled else '关键词安全校验已关闭'
+        log_line(msg)
+        return jsonify(dict(ok=True, enabled=enabled, message=msg, keywords=_sanitize_safety_keywords(safety.get('blocked_keywords', []))))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+@app.route('/api/behavior/safety/save', methods=['POST'])
+def api_behavior_safety_save():
+    try:
+        body = request.get_json(force=True)
+        config = read_json(CONFIG_FILE, {})
+        safety = _reply_safety_config(config)
+        safety['blocked_keywords'] = _sanitize_safety_keywords(body.get('keywords', []))
+        if 'enabled' in body:
+            safety['enabled'] = bool(body.get('enabled'))
+        for key in ('block_on_incoming', 'block_on_outgoing', 'block_political_video_comments'):
+            if key in body:
+                safety[key] = bool(body.get(key))
+        write_json(CONFIG_FILE, config)
+        msg = f"关键词安全校验已保存（{len(safety['blocked_keywords'])} 个关键词）"
+        log_line(msg)
+        return jsonify(dict(ok=True, message=msg, enabled=bool(safety.get('enabled', True)), keywords=safety['blocked_keywords']))
     except Exception as e:
         return jsonify(dict(ok=False, message=str(e))), 400
 
