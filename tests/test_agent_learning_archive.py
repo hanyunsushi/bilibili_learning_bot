@@ -204,6 +204,87 @@ class LearningArchiveFallbackTest(unittest.IsolatedAsyncioTestCase):
             new_agent._BOT_LOCK_FILE = old_lock_file
             new_agent._bot_lock_acquired = old_acquired
 
+    async def test_legacy_httpx_ai_calls_inject_runtime_prompt_skills(self):
+        data_dir = self.tmp / "Data"
+        data_dir.mkdir()
+        (data_dir / "web_personas.json").write_text(json.dumps({
+            "active": "学习搭子",
+            "items": {"学习搭子": {"name": "学习搭子"}},
+        }, ensure_ascii=False), encoding="utf-8")
+        (data_dir / "web_prompt_skills.json").write_text(json.dumps({
+            "items": [
+                {"name": "全局风格", "scope": "global", "content": "所有回复先给结论。"},
+                {"name": "人格补丁", "scope": "persona", "persona": "学习搭子", "content": "用苏格拉底式追问。"},
+                {"name": "其他人格", "scope": "persona", "persona": "旁观者", "content": "不应出现。"},
+            ]
+        }, ensure_ascii=False), encoding="utf-8")
+
+        brain = new_agent.AgentBrain.__new__(new_agent.AgentBrain)
+        captured = {}
+
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"choices": [{"message": {"content": "OK"}}]}
+
+        class FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, headers=None, json=None):
+                captured["json"] = json
+                return FakeResponse()
+
+        with patch.object(new_agent, "DATA_DIR", str(data_dir)), \
+             patch.object(new_agent.httpx, "AsyncClient", FakeAsyncClient):
+            await brain._call_ai_via_httpx(
+                model="chat-model",
+                messages=[{"role": "user", "content": "hi"}],
+                _override_api_key="key",
+                _override_base_url="https://chat.example/v1",
+            )
+
+        joined = "\n".join(str(message.get("content", "")) for message in captured["json"]["messages"])
+        self.assertIn("项目 Prompt Skills", joined)
+        self.assertIn("所有回复先给结论。", joined)
+        self.assertIn("用苏格拉底式追问。", joined)
+        self.assertNotIn("不应出现。", joined)
+
+    def test_legacy_openai_create_wrapper_injects_runtime_prompt_skills(self):
+        data_dir = self.tmp / "Data"
+        data_dir.mkdir()
+        (data_dir / "web_prompt_skills.json").write_text(json.dumps({
+            "items": [
+                {"name": "全局风格", "scope": "global", "content": "所有回复先给结论。"},
+            ]
+        }, ensure_ascii=False), encoding="utf-8")
+        captured = {}
+
+        def fake_create(**kwargs):
+            captured["messages"] = kwargs["messages"]
+            return Mock(choices=[Mock(message=Mock(content="OK"))])
+
+        with patch.object(new_agent, "DATA_DIR", str(data_dir)), \
+             patch.object(new_agent.openai.ChatCompletion, "create", side_effect=fake_create):
+            new_agent._chat_completion_create_with_prompt_skills(
+                model="chat-model",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        joined = "\n".join(str(message.get("content", "")) for message in captured["messages"])
+        self.assertIn("项目 Prompt Skills", joined)
+        self.assertIn("所有回复先给结论。", joined)
+
 
 if __name__ == "__main__":
     unittest.main()

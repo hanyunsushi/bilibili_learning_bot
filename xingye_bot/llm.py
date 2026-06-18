@@ -9,6 +9,7 @@ import httpx
 
 from .settings import DATA_DIR, BotSettings, estimate_model_price
 from .state import BotState
+from .prompt_skills import inject_runtime_prompt_skills
 
 
 class ModelError(RuntimeError):
@@ -44,6 +45,7 @@ class ModelClient:
 
     async def chat(self, messages: list[dict[str, Any]], model_role: str = "chat", purpose: str = "chat") -> str:
         errors: list[str] = []
+        messages = inject_runtime_prompt_skills(messages, data_dir=DATA_DIR)
         for model in self._models_for_role(model_role):
             provider = self._provider_for_role(model_role, model)
             self._ensure_provider_configured(provider, model_role)

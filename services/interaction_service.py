@@ -1,10 +1,31 @@
 """services/interaction_service.py — 评论互动+私信服务"""
 import asyncio, json, os, random, re, time
 from datetime import datetime
+import openai
 from colorama import Fore, Style
-from core.config import config as _global_config, COMMENT_LOG_FILE, COMMENT_MODE, BEHAVIOR_COMMENT_USER_COOLDOWN_MINUTES, MODEL_BRAIN, MAX_REPLIES_PER_CHECK, PROB_COMMENT_OTHERS, log
+from core.config import DATA_DIR, config as _global_config, COMMENT_LOG_FILE, COMMENT_MODE, BEHAVIOR_COMMENT_USER_COOLDOWN_MINUTES, MODEL_BRAIN, MAX_REPLIES_PER_CHECK, PROB_COMMENT_OTHERS, log
 from services.managers import PersonaManager, MoodManager, UserProfileManager
 from services.reply_safety import ReplySafetyGuard
+
+try:
+    from xingye_bot.prompt_skills import inject_runtime_prompt_skills as inject_runtime_prompt_skills_for_ai
+except ImportError:
+    inject_runtime_prompt_skills_for_ai = None
+
+
+def _inject_runtime_prompt_skills(messages):
+    if inject_runtime_prompt_skills_for_ai:
+        try:
+            return inject_runtime_prompt_skills_for_ai(messages, data_dir=DATA_DIR)
+        except Exception as e:
+            log(f"加载 Prompt Skill 失败，已跳过本次注入: {e}", "WARN")
+    return messages
+
+
+def _chat_completion_create_with_prompt_skills(**kwargs):
+    if "messages" in kwargs:
+        kwargs["messages"] = _inject_runtime_prompt_skills(kwargs.get("messages") or [])
+    return openai.ChatCompletion.create(**kwargs)
 
 
 class CommentInteractionManager:
@@ -365,12 +386,12 @@ class CommentInteractionManager:
                     5. 必须用 B站原生表情（[表情名] 格式，不是 emoji），**通常只 1 个**；偶尔连发 3 个相同（如 [doge][doge][doge]）；只有长句才用 2-3 个不同表情：
                        夸赞: [给心心][星星眼][打call][妙啊]  幽默: [doge][吃瓜][笑哭][滑稽][调皮][偷笑]
                        震惊: [惊讶][灵魂出窍][酸了]  吐槽: [无语][嫌弃][抠鼻]  鼓励: [支持][加油][抱拳]
-                    6. 结尾带上"{config.get('behavior', {}).get('ai_marker', '（内容由AI生成并由AI回复）')}"
+                    6. 结尾带上"{_global_config.get('behavior', {}).get('ai_marker', '（内容由AI生成并由AI回复）')}"
                      
                     只返回回复内容，不要有其他文字。
                     """
                     
-                    resp = openai.ChatCompletion.create(
+                    resp = _chat_completion_create_with_prompt_skills(
                         model=MODEL_BRAIN,
                         messages=[
                             {"role": "system", "content": "你是一个友好的B站用户，正在回复别人的评论。"},
@@ -407,5 +428,4 @@ class CommentInteractionManager:
         
         self.last_check_time = datetime.now()
         return processed
-
 

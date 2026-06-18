@@ -65,12 +65,14 @@ if hasattr(sys.stderr, "reconfigure"):
 
 try:
     from xingye_bot.llm import ModelClient
+    from xingye_bot.prompt_skills import inject_runtime_prompt_skills as inject_runtime_prompt_skills_for_ai
     from xingye_bot.settings import load_settings as load_modular_settings
     from xingye_bot.state import BotState
     from xingye_bot.video_modes import VideoUnderstanding, normalize_mode
     from xingye_bot.kb_search import KBSearchEngine
 except ImportError:
     ModelClient = None
+    inject_runtime_prompt_skills_for_ai = None
     load_modular_settings = None
     BotState = None
     VideoUnderstanding = None
@@ -225,6 +227,19 @@ RUNTIME_STATE_FILE = os.path.join(DATA_DIR, "bot_runtime_state.json")
 
 # 确保Data目录存在
 os.makedirs(DATA_DIR, exist_ok=True)
+
+def _inject_runtime_prompt_skills(messages):
+    if inject_runtime_prompt_skills_for_ai:
+        try:
+            return inject_runtime_prompt_skills_for_ai(messages, data_dir=DATA_DIR)
+        except Exception as e:
+            log(f"加载 Prompt Skill 失败，已跳过本次注入: {e}", "WARN")
+    return messages
+
+def _chat_completion_create_with_prompt_skills(**kwargs):
+    if "messages" in kwargs:
+        kwargs["messages"] = _inject_runtime_prompt_skills(kwargs.get("messages") or [])
+    return openai.ChatCompletion.create(**kwargs)
 
 # 默认配置
 DEFAULT_CONFIG = {
@@ -1322,7 +1337,7 @@ class CommentInteractionManager:
                     只返回回复内容，不要有其他文字。
                     """
                     
-                    resp = openai.ChatCompletion.create(
+                    resp = _chat_completion_create_with_prompt_skills(
                         model=MODEL_BRAIN,
                         messages=[
                             {"role": "system", "content": "你是一个友好的B站用户，正在回复别人的评论。"},
@@ -1519,7 +1534,7 @@ class PrivateMessageManager:
 9. 如果需要回复，结尾必须带上"{config.get('behavior', {}).get('ai_marker', '（内容由AI生成并由AI回复）')}"。
 10. 只返回回复内容，不要解释。
 """
-        resp = openai.ChatCompletion.create(
+        resp = _chat_completion_create_with_prompt_skills(
             model=MODEL_BRAIN,
             messages=[
                 {"role": "system", "content": (
@@ -1571,7 +1586,7 @@ class PrivateMessageManager:
 {context_block}
 """
         try:
-            resp = openai.ChatCompletion.create(
+            resp = _chat_completion_create_with_prompt_skills(
                 model=MODEL_BRAIN,
                 messages=[
                     {"role": "system", "content": "你是工具调度器，只返回严格JSON。"},
@@ -5623,7 +5638,7 @@ class KnowledgeBaseClassifier:
             }}
             """
             
-            response = openai.ChatCompletion.create(
+            response = _chat_completion_create_with_prompt_skills(
                 model=MODEL_BRAIN,
                 messages=[
                     {"role": "system", "content": "你是一个专业的知识库分类专家。要大胆创建新分类，不要强行把不相关的内容塞进现有分类。"},
@@ -6179,7 +6194,7 @@ class KnowledgeBaseClassifier:
 - 只返回JSON，不要其他文字"""
 
         try:
-            resp = openai.ChatCompletion.create(
+            resp = _chat_completion_create_with_prompt_skills(
                 model=MODEL_BRAIN,
                 messages=[
                     {"role": "system", "content": "你是严谨的知识库架构师，只输出JSON，不输出任何其他内容。"},
@@ -8155,7 +8170,7 @@ class AgentBrain:
                 url = base_url.rstrip("/")
                 openai.api_base = url
                 openai.base_url = url
-            return openai.ChatCompletion.create(**kwargs)
+            return _chat_completion_create_with_prompt_skills(**kwargs)
         finally:
             openai.api_key = old_api_key
             openai.api_base = old_api_base
@@ -8169,7 +8184,8 @@ class AgentBrain:
         - 备用provider（chatanywhere等）跨提供商降级
         """
         model = kwargs.get("model", MODEL_BRAIN)
-        messages = kwargs.get("messages", [])
+        messages = _inject_runtime_prompt_skills(kwargs.get("messages", []))
+        kwargs["messages"] = messages
         timeout = kwargs.get("request_timeout", 120)
         extra_body = {}
         if "max_tokens" in kwargs:
@@ -9132,7 +9148,7 @@ class AgentBrain:
 
             comments_ctx = comments_ctx[:5000]
 
-            resp = openai.ChatCompletion.create(
+            resp = _chat_completion_create_with_prompt_skills(
                 model=MODEL_BRAIN,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT_COMMENT_SUMMARY},
@@ -9315,7 +9331,7 @@ class AgentBrain:
                         f"已看{videos_watched}个相关视频\n"
                         f"视频内容摘要:\n" + "\n---\n".join(all_subtitles[-5:])
                     )
-                    resp = openai.ChatCompletion.create(
+                    resp = _chat_completion_create_with_prompt_skills(
                         model=MODEL_BRAIN,
                         messages=[
                             {"role": "system", "content": SYSTEM_PROMPT_CURIOSITY_DIVE},
@@ -10668,7 +10684,7 @@ B站等级: Lv.{target_level}
 """
             # [FIX] 用线程池异步执行，防止同步AI调用阻塞事件循环导致崩溃
             resp = await asyncio.to_thread(
-                openai.ChatCompletion.create,
+                _chat_completion_create_with_prompt_skills,
                 model=MODEL_BRAIN,
                 messages=[
                     {"role": "system", "content": "你是B站上的一个普通用户。看了对方主页后再开口——围绕对方的投稿内容或签名展开话题。友好、有边界感、不油腻。"},
@@ -14391,7 +14407,7 @@ async def _ai_search_bilibili_and_add():
     # 2. AI生成搜索关键词
     print(f"{Fore.CYAN}[INFO] AI正在生成B站搜索关键词...{Style.RESET_ALL}")
     try:
-        resp = openai.ChatCompletion.create(
+        resp = _chat_completion_create_with_prompt_skills(
             model=MODEL_BRAIN,
             messages=[
                 {"role": "system", "content": "你是一个B站搜索助手。用户想学习某个主题，请生成1-3个适合在B站搜索的短关键词（每个不超过15字），用中文输出，逗号分隔。只输出关键词，不要多余文字。"},
@@ -14485,7 +14501,7 @@ async def _ai_search_bilibili_and_add():
         # AI总结
         print(f"{Fore.CYAN}[INFO] AI正在总结内容...{Style.RESET_ALL}")
         try:
-            resp = openai.ChatCompletion.create(
+            resp = _chat_completion_create_with_prompt_skills(
                 model=MODEL_BRAIN,
                 messages=[
                     {"role": "system", "content": "你是B站视频学习助手。请根据视频字幕内容，提取核心知识点和关键信息，用简洁的markdown格式输出总结。突出重点，去除口语化填充。"},
@@ -14566,7 +14582,7 @@ async def _ai_search_bilibili_and_add():
         print(f"\n{Fore.CYAN}[INFO] AI正在生成综合总结...{Style.RESET_ALL}")
         try:
             combined_text = "\n\n".join(all_summaries)
-            resp = openai.ChatCompletion.create(
+            resp = _chat_completion_create_with_prompt_skills(
                 model=MODEL_BRAIN,
                 messages=[
                     {"role": "system", "content": "你是知识整合助手。下面是从多个B站视频中提取的知识总结，请将它们整合成一篇连贯、结构清晰的学习笔记。按主题分类，去除重复内容，补充逻辑连接。用markdown格式输出。"},
@@ -14659,7 +14675,7 @@ async def _add_custom_knowledge():
     # AI总结
     print(f"{Fore.CYAN}[INFO] AI正在生成摘要...{Style.RESET_ALL}")
     try:
-        resp = openai.ChatCompletion.create(
+        resp = _chat_completion_create_with_prompt_skills(
             model=MODEL_BRAIN,
             messages=[
                 {"role": "system", "content": "你是一个知识总结助手。请用简洁markdown格式总结以下用户提供的内容，提取核心知识点和关键信息。"},
@@ -14849,7 +14865,7 @@ async def _edit_custom_knowledge(entries):
         # AI重新生成摘要
         print(f"{Fore.CYAN}[INFO] AI正在重新生成摘要...{Style.RESET_ALL}")
         try:
-            resp = openai.ChatCompletion.create(
+            resp = _chat_completion_create_with_prompt_skills(
                 model=MODEL_BRAIN,
                 messages=[
                     {"role": "system", "content": "你是一个知识总结助手。请用简洁markdown格式总结以下内容。"},
@@ -15027,7 +15043,7 @@ async def _call_ai_with_retry_static(model, messages, request_timeout=30, max_re
     """静态AI调用辅助函数（不依赖brain实例），带重试"""
     for attempt in range(max_retries + 1):
         try:
-            resp = openai.ChatCompletion.create(
+            resp = _chat_completion_create_with_prompt_skills(
                 model=model,
                 messages=messages,
                 timeout=request_timeout
@@ -15670,7 +15686,7 @@ B站等级: Lv.{target_level}
 """
             # [FIX] 用线程池异步执行，防止同步AI调用阻塞事件循环导致崩溃
             resp = await asyncio.to_thread(
-                openai.ChatCompletion.create,
+                _chat_completion_create_with_prompt_skills,
                 model=MODEL_BRAIN,
                 messages=[
                     {"role": "system", "content": "你是B站上的一个普通用户。看了对方主页后再开口——围绕对方的投稿内容或签名展开话题。友好、有边界感、不油腻。"},
